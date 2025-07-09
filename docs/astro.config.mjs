@@ -26,6 +26,7 @@ export default defineConfig({
 					label: 'Getting started',
 					items: [
 						{ label: 'Making your first map', slug: 'getting-started/making-your-first-map' },
+						{ label: 'Connecting to a demo database', slug: 'getting-started/connecting-to-demo-postgis' },
 					],
 				},
 				{
