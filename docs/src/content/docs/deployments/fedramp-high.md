@@ -16,7 +16,7 @@ Deployment configurations for Mundi can change over time. For the most up-to-dat
 information, [schedule a call](https://cal.com/buntinglabs/30min) with us.
 :::
 
-This is best for using Mundi in a secure manner when being fully disconnected is not required. For using fully-featured Mundi disconnected from the internet, read the docs here.
+This deployment option is ideal for securely using Mundi when full network disconnection is not required. If you need to run Mundi completely offline in an air-gapped environment, see the [air gapped Mundi guide](./air-gapped.md).
 
 For all deployment options, Bunting Labs does not need access to any servers or data, and can provide all support remotely. Your IT team can self-manage the Kubernetes environment, working closely with our engineering team to work through any issues in a privacy-preserving manner.
 
