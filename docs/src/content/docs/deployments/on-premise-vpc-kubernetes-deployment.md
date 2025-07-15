@@ -64,6 +64,18 @@ and other providers with dedicated Kubernetes support.
 For small on-prem deployments, it may be possible to use Docker Compose, depending on the usage profile.
 For most scenarios with concurrent users, we recommend using Kubernetes.
 
+### FedRAMP High deployment
+
+:::note
+Bunting Labs is not FedRAMP Authorized. Instead, Mundi can run on FedRAMP authorized clouds.
+:::
+
+Mundi can be deployed to federal users, even though we are not FedRAMP authorized. Because Bunting Labs is not FedRAMP authorized, deploying Mundi requires an on-premises deployment in a FedRAMP authorized cloud. 
+
+**Amazon AWS GovCloud:** Mundi can run on AWS Elastic Kubernetes Service in GovCloud. Amazon Bedrock provides access to LLMs within GovCloud, ensuring that traffic never leaves GovCloud.
+
+**Microsoft Azure Government:** Mundi can run on Azure Kubernetes Service in Azure Government and connect to Azure OpenAI, which is also FedRAMP High. 
+
 ### LLM / AI model requirements
 
 Using more powerful LLM models in Mundi improves the user experience.
