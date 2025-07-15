@@ -14,7 +14,7 @@ information, [schedule a call](https://cal.com/buntinglabs/30min) with us.
 
 ## Deploying on Kubernetes
 
-We use a Kubernetes environment provisioned by [Helm charts](https://helm.sh/). Any CNCF‑certified Kubernetes distribution works—whether a managed cloud service, a bare‑metal cluster, or an edge‑scale micro‑k3s node.
+We use a Kubernetes environment provisioned by [Helm charts](https://helm.sh/). Any Kubernetes distribution works. 
 
 Images are kept in your private registry, so the cluster can function with zero outbound traffic.
 
@@ -24,8 +24,12 @@ Air gapped Mundi is designed to be used with a variety of GPUs and models. For s
 
 If your organization has an air-gapped LLM already, Mundi can likely make use of that.
 
-Reach out to us and we can help guide you to the best solution for your needs.
+Depending on your needs, we can benchmark different models for you and determine the right approach. Reach out to us and we can help guide you to the best solution.
 
-## Air gapped vs. hosted features
+## Features impacted when air gapped
+**OpenStreetMap** downloads are disabled. 
+**MapTiler** is replaced with a locally hosted OpenMapTiles deployment.
+**External SQL database connections** outside the air gapped network are not avaialbe.
+**Collaboration bewteen users** is possible but would require custom engineering. Contact us for more information. 
+**SSO** is complex but possible and requires self-hosting something like Authentik.
 
-Air gapped Mundi has access to all core features available in enterprise Mundi—SSO, collaboration, and our latest LLM prompting research. Some features, such as the basemap we rely on, are changed to remove the need for a network connection, but all core functionality is maintained. 
