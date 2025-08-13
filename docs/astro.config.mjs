@@ -26,10 +26,18 @@ export default defineConfig({
 					slug: 'index',
 				},
 				{
-					label: 'Getting started',
+					label: 'Working with spatial databases',
+					items: [
+						{ label: 'Overview', slug: 'Working-with-spatial-databases/overview' },
+						{ label: 'Connecting to a demo database', slug: 'Working-with-spatial-databases/connecting-to-demo-postgis' },
+						{ label: 'Connecting to PostGIS', slug: 'guides/connecting-to-postgis' },
+						{ label: 'Working with a database in Mundi', slug: 'Working-with-spatial-databases/working-with-database' },
+					],
+				},
+				{
+					label: 'Getting started (Copy)',
 					items: [
 						{ label: 'Making your first map', slug: 'getting-started/making-your-first-map' },
-						{ label: 'Uploading files', slug: 'getting-started/uploading-files' },
 						{ label: 'Connecting to a demo database', slug: 'getting-started/connecting-to-demo-postgis' },
 					],
 				},
