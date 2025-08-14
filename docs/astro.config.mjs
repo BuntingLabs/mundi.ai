@@ -31,6 +31,7 @@ export default defineConfig({
 						{ label: 'Making your first map', slug: 'getting-started/making-your-first-map' },
 						{ label: 'Uploading files', slug: 'getting-started/uploading-files' },
 						{ label: 'Connecting to a demo database', slug: 'getting-started/connecting-to-demo-postgis' },
+						{ label: 'Exploring the demo PostGIS', slug: 'getting-started/exploring-the-demo-postgis' },
 					],
 				},
 				{

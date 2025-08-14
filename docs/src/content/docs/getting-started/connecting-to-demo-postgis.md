@@ -38,4 +38,6 @@ To see the wiki, left click on the name of the database you want to see the wiki
 
 ## Working with the example PostGIS
 
+To learn more about the demo database and what you can do with it, read more here: [Working with the demo PostGIS database](/getting-started/exploring-the-demo-postgis)
+
 The demo database behaves in the same way that your own PostGIS would. To see all you can do with Mundi and spatial databases, read this section of the documentation: [Working with PostGIS database](/guides/connecting-to-postgis/#working-with-postgis-database)
