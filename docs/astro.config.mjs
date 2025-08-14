@@ -35,15 +35,14 @@ export default defineConfig({
 				{
 					label: 'Working with spatial databases',
 					items: [
-						{ label: 'Connecting to our Demo Database', slug: 'Working-with-spatial-databases/connecting-to-demo-postgis' },
-						{ label: 'Connecting to PostGIS', slug: 'guides/connecting-to-postgis' },
-						{ label: 'Working with a Database in Mundi', slug: 'Working-with-spatial-databases/working-with-database' },
+						{ label: 'Connecting to our demo database', slug: 'working-with-spatial-databases/connecting-to-demo-postgis' },
+						{ label: 'Connecting to PostGIS', slug: 'working-with-spatial-databases/connecting-to-postgis' },
+						{ label: 'Exploring and mapping databases', slug: 'working-with-spatial-databases/working-with-database' },
 					],
 				},
 				{
 					label: 'Guides',
 					items: [
-						{ label: 'Connecting to PostGIS', slug: 'guides/connecting-to-postgis' },
 						{ label: 'Geoprocessing from QGIS', slug: 'guides/geoprocessing-from-qgis' },
 						{ label: 'Visualizing point clouds', slug: 'guides/visualizing-point-clouds-las-laz' },
 						{ label: 'Satellite basemaps', slug: 'guides/switching-basemaps-satellite-or-traditional-vector' },
