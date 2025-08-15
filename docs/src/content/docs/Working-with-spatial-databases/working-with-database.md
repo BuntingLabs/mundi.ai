@@ -37,26 +37,6 @@ To get a better sense of what Kue can do, try asking:
 - **add all of the pipelines and style by in service status with labels**
 - **add all of ConocoPhillips fields**  
 
-## Working with the example PostGIS
-
-The demo database behaves in the same way that your own PostGIS would. To see all you can do with Mundi and spatial databases, read this section of the documentation: [Working with PostGIS database](/guides/connecting-to-postgis/#working-with-postgis-database)
-
-## Working with PostGIS database
-
-Give the database some time to load. During this time, Mundi is generating wiki-like documentation about
-your database schema.
-
-:::note[Be patient!]
-One US-located database with 100 tables will take 2-5 minutes to load. If your database is located outside
-of the US (for Mundi cloud) or has 1,000+ tables, this may take 10+ minutes.
-:::
-
-![postgis connection is loading](../../../assets/postgis/loading.png)
-
-Once it's loaded, it will appear in your project's database list, with an AI generated name and table count.
-
-![AI generated database name](../../../assets/postgis/loaded.png)
-
 ## AI database documentation
 
 You can hover over the database name and click on it to view the generated wiki page.
