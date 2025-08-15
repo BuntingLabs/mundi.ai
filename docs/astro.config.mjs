@@ -35,7 +35,6 @@ export default defineConfig({
 				{
 					label: 'Working with spatial databases',
 					items: [
-						{ label: 'Connecting to our demo database', slug: 'working-with-spatial-databases/connecting-to-demo-postgis' },
 						{ label: 'Connecting to PostGIS', slug: 'working-with-spatial-databases/connecting-to-postgis' },
 						{ label: 'Exploring and mapping databases', slug: 'working-with-spatial-databases/working-with-database' },
 					],

@@ -6,6 +6,41 @@ Mundi is built to be the easiest way to work with complex spatial databases.
 
 Whether you are an expert with SQL and GIS, or you are a complete newcomer, we built Mundi to be the fastest interface for exploring the contents of a spatial database, adding its data to a map, and styling it however you need. 
 
+## Start with our demo PostGIS database
+
+Mundi comes with a pre-built connection to an example PostGIS database you can explore before connecting your own. Here is how to connect to it and a few prompts to run to get the full experience. 
+
+### Connecting to the database
+
+Once you've created your first map, you can find the demo database inside the database connection menu.
+
+:::note[Open Data License]
+The database is from the [Norwegian Offshore Directorate](https://www.sodir.no/en/) and is licensed under the [Norwegian Licence for Open Government Data](https://data.norge.no/nlod/en).
+:::
+
+1.  Click the **Load PostGIS** icon to get started.
+
+![Load PostGIS icon](../../../assets/demo-database/load-postgis.jpg)
+
+2.  The **Add a PostGIS Database** menu will open.
+
+3.  Click the **Demo Database** button, then **Add Connection** in the lower right to conect to the database.
+
+![Load PostGIS icon](../../../assets/demo-database/demo-database-icon.jpg)
+
+4. The connection will take about 2 minutes to load. If it takes longer than 2 minutes, refresh the page.
+
+### Example requests to Kue
+
+To get a better sense of what Kue can do, try asking: 
+- **what companies control the most pipelines?** 
+- **add all of the pipelines and style by in service status with labels**
+- **add all of ConocoPhillips fields**  
+
+## Working with the example PostGIS
+
+The demo database behaves in the same way that your own PostGIS would. To see all you can do with Mundi and spatial databases, read this section of the documentation: [Working with PostGIS database](/guides/connecting-to-postgis/#working-with-postgis-database)
+
 ## Working with PostGIS database
 
 Give the database some time to load. During this time, Mundi is generating wiki-like documentation about
