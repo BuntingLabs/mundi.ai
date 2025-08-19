@@ -18,6 +18,8 @@ import uuid
 import math
 import secrets
 import json
+import csv
+from io import StringIO
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -1094,6 +1096,40 @@ async def internal_upload_layer(
             if file_ext == ".csv":
                 auxiliary_temp_file_path = temp_file_path + ".fgb"
 
+                # Detect column names for X/Y in a case-insensitive way from the header
+                # Decode a small portion; use utf-8-sig to strip BOM if present
+                sample_text = content.decode("utf-8-sig", errors="replace")
+                reader = csv.reader(StringIO(sample_text))
+
+                normalized = {h.strip().lower(): h for h in next(reader, [])}
+                detected_x = next(
+                    (
+                        normalized[col]
+                        for col in ["lon", "long", "longitude", "lng", "x"]
+                        if col in normalized
+                    ),
+                    None,
+                )
+                detected_y = next(
+                    (
+                        normalized[col]
+                        for col in ["lat", "latitude", "y"]
+                        if col in normalized
+                    ),
+                    None,
+                )
+
+                if not detected_x or not detected_y:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "CSV header must include longitude and latitude columns. "
+                            "Accepted names (case-insensitive): "
+                            "X: lon, long, longitude, lng, x; "
+                            "Y: lat, latitude, y."
+                        ),
+                    )
+
                 ogr_cmd = [
                     "ogr2ogr",
                     "-if",
@@ -1103,9 +1139,9 @@ async def internal_upload_layer(
                     auxiliary_temp_file_path,
                     temp_file_path,
                     "-oo",
-                    "X_POSSIBLE_NAMES=lon,longitude,lng,x,X,Longitude,LON,LONGITUDE",
+                    f"X_POSSIBLE_NAMES={detected_x}",
                     "-oo",
-                    "Y_POSSIBLE_NAMES=lat,latitude,y,Y,Latitude,LAT,LATITUDE",
+                    f"Y_POSSIBLE_NAMES={detected_y}",
                     "-lco",
                     "SPATIAL_INDEX=YES",
                     "-a_srs",
@@ -1133,7 +1169,7 @@ async def internal_upload_layer(
                 except subprocess.CalledProcessError:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Failed to convert CSV to spatial format, make sure CSV has a column named lat/lon/lng, latitude/longitude, or x/y.",
+                        detail="Failed to convert CSV to spatial format, make sure CSV has a column named lat/lon/long/lng, latitude/longitude, or x/y.",
                     )
             # convert kml/kmz to flatgeobufs
             elif file_ext in [".kml", ".kmz"]:
