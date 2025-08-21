@@ -210,6 +210,11 @@ class DefaultLayerDescriber(LayerDescriber):
             f"Last Edited: {str(layer_data['last_edited']) if layer_data['last_edited'] else 'Unknown'}"
         )
 
+        # TODO: Add proper remote source description
+        if layer_data.get("remote_url"):
+            markdown_content.append("Source: Remote")
+            return markdown_content
+
         bucket_name = get_bucket_name()
 
         with tempfile.TemporaryDirectory() as temp_dir:

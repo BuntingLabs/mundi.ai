@@ -11,6 +11,8 @@ import {
   Link,
   Loader2,
   Plus,
+  Server,
+  Sheet,
   SignalHigh,
   SignalLow,
   Upload,
@@ -21,6 +23,8 @@ import { useNavigate } from 'react-router-dom';
 import { ReadyState } from 'react-use-websocket';
 import { toast } from 'sonner';
 import { AddRemoteDataSource } from '@/components/AddRemoteDataSource';
+import { ConnectGoogleSheets } from '@/components/ConnectGoogleSheets';
+import { ConnectWFS } from '@/components/ConnectWFS';
 import EditableTitle from '@/components/EditableTitle';
 import { LayerListItem } from '@/components/LayerListItem';
 import { Button } from '@/components/ui/button';
@@ -109,6 +113,8 @@ const LayerList: React.FC<LayerListProps> = ({
   const [postgisError, setPostgisError] = useState<string | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showRemoteUrlDialog, setShowRemoteUrlDialog] = useState(false);
+  const [showWFSDialog, setShowWFSDialog] = useState(false);
+  const [showGoogleSheetsDialog, setShowGoogleSheetsDialog] = useState(false);
   const [portError, setPortError] = useState<string | null>(null);
 
   const postgisConnectionMutation = useMutation({
@@ -654,6 +660,14 @@ const LayerList: React.FC<LayerListProps> = ({
                   <Link className="h-4 w-4 mr-2" />
                   Add remote URL
                 </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowWFSDialog(true)} className="cursor-pointer">
+                  <Server className="h-4 w-4 mr-2" />
+                  Connect to WFS
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowGoogleSheetsDialog(true)} className="cursor-pointer">
+                  <Sheet className="h-4 w-4 mr-2" />
+                  Google Sheets
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </TooltipProvider>
@@ -929,7 +943,21 @@ const LayerList: React.FC<LayerListProps> = ({
         <AddRemoteDataSource
           isOpen={showRemoteUrlDialog}
           onClose={() => setShowRemoteUrlDialog(false)}
-          projectId={currentMapData?.project_id}
+          mapId={currentMapData?.map_id}
+          onSuccess={updateMapData}
+        />
+
+        <ConnectWFS
+          isOpen={showWFSDialog}
+          onClose={() => setShowWFSDialog(false)}
+          mapId={currentMapData?.map_id}
+          onSuccess={updateMapData}
+        />
+
+        <ConnectGoogleSheets
+          isOpen={showGoogleSheetsDialog}
+          onClose={() => setShowGoogleSheetsDialog(false)}
+          mapId={currentMapData?.map_id}
           onSuccess={updateMapData}
         />
       </CardFooter>

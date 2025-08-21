@@ -710,40 +710,44 @@ async def get_layer_geojson(
             detail="Layer is not a vector type. GeoJSON format is only available for vector data.",
         )
 
-    # Retrieve the vector data
-    bucket_name = get_bucket_name()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Get file extension from s3_key
-        s3_key = layer.s3_key
-        file_extension = os.path.splitext(s3_key)[1]
-
-        local_input_file = os.path.join(
-            temp_dir, f"layer_{layer.layer_id}_input{file_extension}"
+    # Handle remote URLs and S3 storage uniformly, but keep PostGIS separate
+    if layer.type == "postgis":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PostGIS layers not yet supported for GeoJSON export.",
         )
 
-        # Download from S3 using async client
-        s3 = await get_async_s3_client()
-        await s3.download_file(bucket_name, s3_key, local_input_file)
+    # Get unified OGR source (works for S3 and remote URLs)
+    async with await layer.get_ogr_source() as ogr_source:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Convert to GeoJSON using ogr2ogr with unified source
+            local_geojson_file = os.path.join(
+                temp_dir, f"layer_{layer.layer_id}.geojson"
+            )
+            ogr_cmd = [
+                "ogr2ogr",
+                "-f",
+                "GeoJSON",
+                "-t_srs",
+                "EPSG:4326",  # Ensure coordinates are in WGS84
+                "-lco",
+                "COORDINATE_PRECISION=6",  # ~1m precision at equator
+                "-skipfailures",  # Skip features with NULL geometries or other issues
+                local_geojson_file,
+                ogr_source,
+            ]
 
-        # Convert to GeoJSON using ogr2ogr
-        local_geojson_file = os.path.join(temp_dir, f"layer_{layer.layer_id}.geojson")
-        ogr_cmd = [
-            "ogr2ogr",
-            "-f",
-            "GeoJSON",
-            "-t_srs",
-            "EPSG:4326",  # Ensure coordinates are in WGS84
-            "-lco",
-            "COORDINATE_PRECISION=6",  # ~1m precision at equator
-            "-skipfailures",  # Skip features with NULL geometries or other issues
-            local_geojson_file,
-            local_input_file,
-        ]
-        subprocess.run(ogr_cmd, check=True)
+            process = await asyncio.create_subprocess_exec(*ogr_cmd)
+            await process.wait()
+            if process.returncode != 0:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to convert layer to GeoJSON format",
+                )
 
-        # Read the GeoJSON file and return it
-        with open(local_geojson_file, "r") as f:
-            geojson_content = f.read()
+            # Read the GeoJSON file and return it
+            with open(local_geojson_file, "r") as f:
+                geojson_content = f.read()
 
         # Return the GeoJSON with appropriate headers and cache control
         return Response(

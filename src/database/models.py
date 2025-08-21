@@ -176,6 +176,7 @@ class MapLayer(Base):
     feature_count = Column(Integer)  # Number of features in vector layers
     size_bytes = Column(BIGINT)  # Size of uploaded layer in bytes
     source_map_id = Column(String)  # Optional map ID that this layer was created from
+    remote_url = Column(String)  # Optional remote URL for external data sources
     created_on = Column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -192,6 +193,53 @@ class MapLayer(Base):
         """Return metadata as parsed JSON."""
         if self.metadata is not None:
             return json.loads(self.metadata)
+
+    async def get_ogr_source(self):
+        """Return OGR-compatible source string for this layer
+
+        For remote URLs, returns the /vsicurl/ path directly.
+        For S3 storage, downloads to a temporary file and yields the local path.
+        Use as an async context manager to ensure cleanup.
+        """
+        from contextlib import asynccontextmanager
+        import tempfile
+        import os
+
+        @asynccontextmanager
+        async def _source_context():
+            if self.remote_url:
+                # Special handling for WFS (Web Feature Service) URLs
+                # WFS URLs contain service protocol parameters and should not use /vsicurl/ prefix
+                if (
+                    "SERVICE=WFS" in self.remote_url.upper()
+                    and "REQUEST=GETFEATURE" in self.remote_url.upper()
+                ):
+                    yield self.remote_url  # Use WFS URL directly
+                else:
+                    # Regular remote URL: use vsicurl
+                    yield f"/vsicurl/{self.remote_url}"
+            else:
+                # S3 storage: download to temporary file
+                from src.utils import get_async_s3_client, get_bucket_name
+
+                s3_client = await get_async_s3_client()
+                bucket_name = get_bucket_name()
+
+                # Create temporary file with appropriate extension
+                file_ext = os.path.splitext(self.s3_key)[1] if self.s3_key else ""
+                with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
+                    temp_path = tmp.name
+
+                try:
+                    # Download S3 file to temporary location
+                    await s3_client.download_file(bucket_name, self.s3_key, temp_path)
+                    yield temp_path
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+
+        return _source_context()
 
     # Relationships
     postgis_connection = relationship(
