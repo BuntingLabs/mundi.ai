@@ -1741,6 +1741,8 @@ async def add_remote_layer(
     allowing efficient access to cloud-optimized formats without downloading the entire file.
     """
 
+    validated_url = validate_remote_url(request.url, request.source_type)
+
     # Assert URL format matches the declared source type
     if request.source_type == "sheets":
         assert request.url.startswith("CSV:"), (
