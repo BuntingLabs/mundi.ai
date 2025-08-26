@@ -36,6 +36,7 @@ from src.routes import (
 )
 from src.routes.postgres_routes import basemap_router
 from src.routes.layer_router import layer_router
+from src.routes.attribute_table import attribute_table_router
 # from fastapi_mcp import FastApiMCP
 
 
@@ -94,6 +95,11 @@ app.include_router(
     layer_router,
     prefix="/api",
     tags=["Layers"],
+)
+app.include_router(
+    attribute_table_router,
+    prefix="/api",
+    tags=["Attribute Tables"],
 )
 app.include_router(
     project_routes.project_router,

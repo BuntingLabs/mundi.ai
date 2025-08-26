@@ -69,24 +69,24 @@ async def test_embed_route_with_invalid_origin(auth_client, test_project_with_ma
 
 
 @pytest.mark.anyio
-async def test_embed_route_with_valid_origin(auth_client, test_project_with_map):
-    project_id = test_project_with_map["project_id"]
+async def test_embed_route_with_valid_origin(auth_client, test_project_with_multiple_origins):
+    project_id = test_project_with_multiple_origins["project_id"]
 
     with patch.dict(
         os.environ,
-        {"MUNDI_EMBED_ALLOWED_ORIGINS": "https://example.com,https://trusted.com"},
+        {"MUNDI_EMBED_ALLOWED_ORIGINS": "https://site1.com,https://site2.com"},
     ):
         response = await auth_client.get(
             f"/api/projects/embed/v1/{project_id}.html",
-            headers={"origin": "https://example.com"},
+            headers={"origin": "https://site1.com"},
         )
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/html; charset=utf-8"
         csp_header = response.headers["content-security-policy"]
         # Check key CSP components are present
         assert "frame-ancestors 'self'" in csp_header
-        assert "https://example.com" in csp_header
-        assert "https://trusted.com" in csp_header
+        assert "https://site1.com" in csp_header
+        assert "https://site2.com" in csp_header
         assert "script-src 'self' 'unsafe-inline' https://unpkg.com" in csp_header
         assert "worker-src 'self' blob:" in csp_header
         assert "style-src 'self' 'unsafe-inline' https://unpkg.com" in csp_header
@@ -107,21 +107,21 @@ async def test_embed_route_with_valid_origin(auth_client, test_project_with_map)
 
 
 @pytest.mark.anyio
-async def test_embed_route_with_valid_referer(auth_client, test_project_with_map):
-    project_id = test_project_with_map["project_id"]
+async def test_embed_route_with_valid_referer(auth_client, test_project_with_multiple_origins):
+    project_id = test_project_with_multiple_origins["project_id"]
 
     with patch.dict(
-        os.environ, {"MUNDI_EMBED_ALLOWED_ORIGINS": "http://localhost:4321"}
+        os.environ, {"MUNDI_EMBED_ALLOWED_ORIGINS": "https://site1.com"}
     ):
         response = await auth_client.get(
             f"/api/projects/embed/v1/{project_id}.html",
-            headers={"referer": "http://localhost:4321/guides/embedding-maps"},
+            headers={"referer": "https://site1.com/guides/embedding-maps"},
         )
         assert response.status_code == 200
         csp_header = response.headers["content-security-policy"]
         # Check key CSP components are present
         assert "frame-ancestors 'self'" in csp_header
-        assert "http://localhost:4321" in csp_header
+        assert "https://site1.com" in csp_header
         assert "script-src 'self' 'unsafe-inline' https://unpkg.com" in csp_header
         assert "worker-src 'self' blob:" in csp_header
         assert "style-src 'self' 'unsafe-inline' https://unpkg.com" in csp_header

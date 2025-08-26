@@ -28,7 +28,7 @@ from typing import Any, Dict, Tuple
 import asyncpg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from anyio import EndOfStream
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from src.dependencies.session import UserContext, verify_websocket
 from src.database.models import Conversation, MundiChatCompletionMessage
@@ -60,8 +60,9 @@ class EphemeralNotificationPayload(ConversationRelatedPayload):
     bounds: list[float] | None
     updates: dict[str, Any]
 
-    class Config:
-        json_encoders = {datetime: lambda v: v.isoformat() if v else None}
+    model_config = ConfigDict(
+        json_encoders={datetime: lambda v: v.isoformat() if v else None}
+    )
 
 
 class EphemeralErrorNotificationPayload(ConversationRelatedPayload):
@@ -71,8 +72,9 @@ class EphemeralErrorNotificationPayload(ConversationRelatedPayload):
     timestamp: datetime
     status: str
 
-    class Config:
-        json_encoders = {datetime: lambda v: v.isoformat() if v else None}
+    model_config = ConfigDict(
+        json_encoders={datetime: lambda v: v.isoformat() if v else None}
+    )
 
 
 # Create router

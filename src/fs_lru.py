@@ -112,7 +112,7 @@ class LayerCache:
             layer = await conn.fetchrow(
                 """
                 SELECT layer_id, name, type, metadata, bounds, geometry_type,
-                    created_on, last_edited, feature_count, s3_key
+                    created_on, last_edited, feature_count, s3_key, remote_url
                 FROM map_layers
                 WHERE layer_id = $1
                 """,
@@ -139,37 +139,24 @@ class LayerCache:
                 layer_id,
             )
 
-            bucket_name = get_bucket_name()
+            # Handle remote sources
+            if layer["remote_url"]:
+                # Remote URL: use vsicurl with ogr2ogr
+                ogr_source = f"/vsicurl/{layer['remote_url']}"
 
-            with tempfile.TemporaryDirectory() as temp_dir:
-                s3_key = layer["s3_key"]
-                file_extension = os.path.splitext(s3_key)[1]
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    cached_output_gpkg = os.path.join(temp_dir, f"{layer_id}.gpkg")
 
-                local_input_file = os.path.join(
-                    temp_dir, f"{layer_id}_input{file_extension}"
-                )
+                    if format != "GeoPackage":
+                        raise TypeError("only GeoPackage supported in bytes_for_layer")
 
-                s3 = await get_async_s3_client()
-                await s3.download_file(bucket_name, s3_key, local_input_file)
-
-                cached_output_gpkg = os.path.join(temp_dir, f"{layer_id}.gpkg")
-
-                if format != "GeoPackage":
-                    raise TypeError("only GeoPackage supported in bytes_for_layer")
-
-                if file_extension.lower() == ".gpkg":
-                    with (
-                        open(local_input_file, "rb") as src,
-                        open(cached_output_gpkg, "wb") as dst,
-                    ):
-                        dst.write(src.read())
-                else:
+                    # Use ogr2ogr to convert remote source to GPKG
                     ogr_cmd = [
                         "ogr2ogr",
                         "-f",
                         "GPKG",
                         cached_output_gpkg,
-                        local_input_file,
+                        ogr_source,
                     ]
                     process = await asyncio.create_subprocess_exec(*ogr_cmd)
                     await process.wait()
@@ -178,9 +165,54 @@ class LayerCache:
                             f"ogr2ogr command failed with exit code {process.returncode}"
                         )
 
-                with open(cached_output_gpkg, "rb") as f:
-                    data = f.read()
-                self.file_cache.set(cache_key, data)
+                    with open(cached_output_gpkg, "rb") as f:
+                        data = f.read()
+                    self.file_cache.set(cache_key, data)
+
+            else:
+                # S3 storage: original approach
+                bucket_name = get_bucket_name()
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    s3_key = layer["s3_key"]
+                    file_extension = os.path.splitext(s3_key)[1]
+
+                    local_input_file = os.path.join(
+                        temp_dir, f"{layer_id}_input{file_extension}"
+                    )
+
+                    s3 = await get_async_s3_client()
+                    await s3.download_file(bucket_name, s3_key, local_input_file)
+
+                    cached_output_gpkg = os.path.join(temp_dir, f"{layer_id}.gpkg")
+
+                    if format != "GeoPackage":
+                        raise TypeError("only GeoPackage supported in bytes_for_layer")
+
+                    if file_extension.lower() == ".gpkg":
+                        with (
+                            open(local_input_file, "rb") as src,
+                            open(cached_output_gpkg, "wb") as dst,
+                        ):
+                            dst.write(src.read())
+                    else:
+                        ogr_cmd = [
+                            "ogr2ogr",
+                            "-f",
+                            "GPKG",
+                            cached_output_gpkg,
+                            local_input_file,
+                        ]
+                        process = await asyncio.create_subprocess_exec(*ogr_cmd)
+                        await process.wait()
+                        if process.returncode != 0:
+                            raise Exception(
+                                f"ogr2ogr command failed with exit code {process.returncode}"
+                            )
+
+                    with open(cached_output_gpkg, "rb") as f:
+                        data = f.read()
+                    self.file_cache.set(cache_key, data)
 
         return self.file_cache.get(cache_key)
 

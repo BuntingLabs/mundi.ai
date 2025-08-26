@@ -34,6 +34,16 @@ Mundi will automatically upload and process the file. Once complete, your data w
 
 Notice the layer name is highlighted in green. This signifies that the layer is a new, unsaved addition to your map.
 
+## Renaming the map
+
+In the top left corner, in the layer list, every new map will be called "Click here to change the map name". If you double click that name, you can enter a new name for your project.
+
+:::note[Rename!]
+Here I changed from the default "Click here to change map name" to "Freshly renamed map"
+:::
+
+![Renamed map](../../../assets/first-map/renamed-map.jpg)
+
 ## Querying in the AI attribute table
 
 Before styling, it's helpful to understand the data you're working with. Mundi's attribute table allows you to inspect the features and even query them using natural language.

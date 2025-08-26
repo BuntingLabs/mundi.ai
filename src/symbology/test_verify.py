@@ -14,10 +14,12 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import pytest
 from src.symbology.verify import verify_full_style_json_str, StyleValidationError
 
 
-def test_verify_valid_style_json():
+@pytest.mark.anyio
+async def test_verify_valid_style_json():
     with open(
         os.path.join(
             os.path.dirname(__file__),
@@ -30,11 +32,12 @@ def test_verify_valid_style_json():
     ) as f:
         style_json_str = f.read()
 
-    is_valid = verify_full_style_json_str(style_json_str)
+    is_valid = await verify_full_style_json_str(style_json_str)
     assert is_valid, "Valid style was incorrectly marked as invalid"
 
 
-def test_verify_invalid_style_json():
+@pytest.mark.anyio
+async def test_verify_invalid_style_json():
     with open(
         os.path.join(
             os.path.dirname(__file__),
@@ -48,7 +51,7 @@ def test_verify_invalid_style_json():
         style_json_str = f.read()
 
     try:
-        result = verify_full_style_json_str(style_json_str)
+        result = await verify_full_style_json_str(style_json_str)
         assert not result, "Invalid style was incorrectly marked as valid"
     except StyleValidationError as e:
         assert 'source "crimea" not found' in str(e), (

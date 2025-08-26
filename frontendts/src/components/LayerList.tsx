@@ -11,6 +11,8 @@ import {
   Link,
   Loader2,
   Plus,
+  Server,
+  Sheet,
   SignalHigh,
   SignalLow,
   Upload,
@@ -21,6 +23,9 @@ import { useNavigate } from 'react-router-dom';
 import { ReadyState } from 'react-use-websocket';
 import { toast } from 'sonner';
 import { AddRemoteDataSource } from '@/components/AddRemoteDataSource';
+import { ConnectESRIFeatureService } from '@/components/ConnectESRIFeatureService';
+import { ConnectGoogleSheets } from '@/components/ConnectGoogleSheets';
+import { ConnectWFS } from '@/components/ConnectWFS';
 import EditableTitle from '@/components/EditableTitle';
 import { LayerListItem } from '@/components/LayerListItem';
 import { Button } from '@/components/ui/button';
@@ -30,6 +35,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ShareEmbedModal } from '@/lib/ee-loader';
+import type { ErrorEntry } from '../lib/frontend-types';
 import type { EphemeralAction, MapData, MapLayer, MapProject } from '../lib/types';
 
 interface UploadingFile {
@@ -64,6 +70,7 @@ interface LayerListProps {
   demoConfig: { available: boolean; description: string };
   hiddenLayerIDs: string[];
   toggleLayerVisibility: (layerId: string) => void;
+  errors: ErrorEntry[];
 }
 
 const LayerList: React.FC<LayerListProps> = ({
@@ -86,10 +93,16 @@ const LayerList: React.FC<LayerListProps> = ({
   demoConfig,
   hiddenLayerIDs,
   toggleLayerVisibility,
+  errors,
 }) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [showPostgisDialog, setShowPostgisDialog] = useState(false);
+
+  // Helper function to get errors for a specific source/layer ID
+  const getLayerErrors = (layerId: string): ErrorEntry[] => {
+    return errors.filter((error) => error.sourceId === layerId);
+  };
 
   // Component to render legend symbol for a layer
   const LayerLegendSymbol = ({ layerDetails }: { layerDetails: MapLayer }) => {
@@ -109,6 +122,9 @@ const LayerList: React.FC<LayerListProps> = ({
   const [postgisError, setPostgisError] = useState<string | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showRemoteUrlDialog, setShowRemoteUrlDialog] = useState(false);
+  const [showWFSDialog, setShowWFSDialog] = useState(false);
+  const [showGoogleSheetsDialog, setShowGoogleSheetsDialog] = useState(false);
+  const [showESRIDialog, setShowESRIDialog] = useState(false);
   const [portError, setPortError] = useState<string | null>(null);
 
   const postgisConnectionMutation = useMutation({
@@ -316,11 +332,28 @@ const LayerList: React.FC<LayerListProps> = ({
 
               const hoverText = layerDetails.type === 'raster' ? undefined : sridDisplay;
 
+              // Check for errors associated with this layer
+              const layerErrors = getLayerErrors(layerDetails.id);
+              const hasErrors = layerErrors.length > 0;
+
+              const getNameClassName = () => {
+                if (hiddenLayerIDs.includes(layerDetails.id)) {
+                  return 'line-through text-gray-400';
+                }
+                if (hasErrors) {
+                  return 'text-red-300';
+                }
+                return '';
+              };
+
+              // Create title text from error messages if any
+              const errorTitle = hasErrors ? layerErrors.map((error) => error.message).join(' | ') : undefined;
+
               return (
                 <li key={layerDetails.id}>
                   <LayerListItem
                     name={layerDetails.name}
-                    nameClassName={hiddenLayerIDs.includes(layerDetails.id) ? 'line-through text-gray-400' : ''}
+                    nameClassName={getNameClassName()}
                     status={status}
                     isActive={hasActiveAction}
                     hoverText={hoverText}
@@ -329,6 +362,7 @@ const LayerList: React.FC<LayerListProps> = ({
                     displayAsDiff={currentMapData.display_as_diff}
                     layerId={layerDetails.id}
                     isVisible={!hiddenLayerIDs.includes(layerDetails.id)}
+                    title={errorTitle}
                     onToggleVisibility={(layerId) => {
                       toggleLayerVisibility(layerId);
                     }}
@@ -654,6 +688,18 @@ const LayerList: React.FC<LayerListProps> = ({
                   <Link className="h-4 w-4 mr-2" />
                   Add remote URL
                 </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowWFSDialog(true)} className="cursor-pointer">
+                  <Server className="h-4 w-4 mr-2" />
+                  Connect to WFS
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowGoogleSheetsDialog(true)} className="cursor-pointer">
+                  <Sheet className="h-4 w-4 mr-2" />
+                  Google Sheets
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowESRIDialog(true)} className="cursor-pointer">
+                  <Database className="h-4 w-4 mr-2" />
+                  ESRI Feature Service
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </TooltipProvider>
@@ -929,7 +975,27 @@ const LayerList: React.FC<LayerListProps> = ({
         <AddRemoteDataSource
           isOpen={showRemoteUrlDialog}
           onClose={() => setShowRemoteUrlDialog(false)}
-          projectId={currentMapData?.project_id}
+          mapId={currentMapData?.map_id}
+          onSuccess={updateMapData}
+        />
+
+        <ConnectWFS
+          isOpen={showWFSDialog}
+          onClose={() => setShowWFSDialog(false)}
+          mapId={currentMapData?.map_id}
+          onSuccess={updateMapData}
+        />
+
+        <ConnectGoogleSheets
+          isOpen={showGoogleSheetsDialog}
+          onClose={() => setShowGoogleSheetsDialog(false)}
+          mapId={currentMapData?.map_id}
+          onSuccess={updateMapData}
+        />
+        <ConnectESRIFeatureService
+          isOpen={showESRIDialog}
+          onClose={() => setShowESRIDialog(false)}
+          mapId={currentMapData?.map_id}
           onSuccess={updateMapData}
         />
       </CardFooter>

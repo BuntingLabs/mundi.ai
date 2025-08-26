@@ -2,6 +2,7 @@ import { BookOpen, Cloud, House, KeyRound, LogIn, LogOut, PanelRightClose, Panel
 import { Suspense } from 'react';
 import { Link } from 'react-router-dom';
 import Session, { signOut } from 'supertokens-auth-react/recipe/session';
+import BuntingBirdSvg from '@/assets/bunting_bird.svg';
 import MDarkSvg from '@/assets/M-dark.svg';
 import MLightSvg from '@/assets/M-light.svg';
 import MundiDarkSvg from '@/assets/Mundi-dark.svg';
@@ -21,28 +22,26 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useProjects } from '@/contexts/ProjectsContext';
 import { ScheduleCallButton } from '@/lib/ee-loader';
-import type { MapProject, ProjectState } from '@/lib/types';
+import type { MapProject } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 
-export function AppSidebar({ projects }: { projects: ProjectState }) {
+export function AppSidebar() {
   const sessionContext = Session.useSessionContext();
   const { state, toggleSidebar } = useSidebar();
+  const { allProjects, allProjectsLoading } = useProjects();
 
   async function onLogout() {
     await signOut();
     window.location.href = '/auth'; // or redirect to wherever the login page is
   }
 
-  let recentProjects: MapProject[] = [];
-  if (projects.type === 'loaded') {
-    recentProjects = projects.projects
-      .sort(
-        (a, b) =>
-          new Date(b.most_recent_version?.last_edited || '').getTime() - new Date(a.most_recent_version?.last_edited || '').getTime(),
-      )
-      .slice(0, 3);
-  }
+  const recentProjects: MapProject[] = allProjects
+    .sort(
+      (a, b) => new Date(b.most_recent_version?.last_edited || '').getTime() - new Date(a.most_recent_version?.last_edited || '').getTime(),
+    )
+    .slice(0, 3);
 
   return (
     <Sidebar collapsible="icon" data-theme="light" className="border-none">
@@ -97,7 +96,7 @@ export function AppSidebar({ projects }: { projects: ProjectState }) {
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
-                {projects.type === 'loaded' && state === 'expanded' && (
+                {!allProjectsLoading && state === 'expanded' && (
                   <>
                     {recentProjects.map((project) => (
                       <SidebarMenuItem key={project.id}>
@@ -196,7 +195,7 @@ export function AppSidebar({ projects }: { projects: ProjectState }) {
         <div className="text-center">
           <a href="https://buntinglabs.com" target="_blank" className="text-muted-foreground text-xs hover:underline">
             {state === 'collapsed' ? (
-              <img src="/public/bunting_bird.svg" alt="Bunting Labs" className="w-6 h-6 mx-auto my-2" />
+              <img src={BuntingBirdSvg} alt="Bunting Labs" className="w-6 h-6 mx-auto my-2" />
             ) : (
               '© Bunting Labs, Inc. 2025'
             )}

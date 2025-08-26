@@ -56,34 +56,41 @@ def run_qgis_process(request: QGISProcessRequest) -> Dict[str, Any]:
 
         if request.input_urls:
             for param_name, url in request.input_urls.items():
-                parsed = urlparse(url)
-                filename = os.path.basename(parsed.path)
-                if "." not in filename:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": "Invalid Input URL",
-                            "message": f"Input URL {url} basename must have a file extension",
-                        },
-                    )
+                # Check if this is a regular HTTP/HTTPS URL that needs downloading as a file
+                # OGR driver-prefixed URLs (WFS:, ESRIJSON:, /vsicurl/) should be passed directly to QGIS
+                if url.startswith(("http://", "https://")):
+                    # Traditional file download for regular HTTP/HTTPS URLs
+                    parsed = urlparse(url)
+                    filename = os.path.basename(parsed.path)
+                    if "." not in filename:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "error": "Invalid Input URL",
+                                "message": "Input URL basename must have a file extension",
+                            },
+                        )
 
-                local_path = os.path.join(temp_dir, filename)
+                    local_path = os.path.join(temp_dir, filename)
 
-                try:
-                    with urlopen(url) as response:
-                        with open(local_path, "wb") as f:
-                            f.write(response.read())
-                except (HTTPError, URLError) as e:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": "Failed to download input file",
-                            "message": f"Could not download {url}: {str(e)}",
-                        },
-                    )
+                    try:
+                        with urlopen(url) as response:
+                            with open(local_path, "wb") as f:
+                                f.write(response.read())
+                    except (HTTPError, URLError):
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "error": "Failed to download input file",
+                                "message": "Could not download from URL",
+                            },
+                        )
 
-                # Update qgis_inputs to use local path
-                request.qgis_inputs[param_name] = local_path
+                    # Update qgis_inputs to use local path
+                    request.qgis_inputs[param_name] = local_path
+                else:
+                    # Pass OGR source strings directly to QGIS without downloading
+                    request.qgis_inputs[param_name] = url
 
         # Also add OUTPUT parameters that are only specified in output_presigned_put_urls
         if request.output_presigned_put_urls:

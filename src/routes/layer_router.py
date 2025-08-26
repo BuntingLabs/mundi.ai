@@ -34,7 +34,6 @@ from ..dependencies.session import (
     session_user_id,
     UserContext,
 )
-from ..utils import get_openai_client
 import logging
 import re
 from redis import Redis
@@ -45,13 +44,10 @@ from src.utils import (
     get_bucket_name,
     get_async_s3_client,
 )
-import duckdb
 import subprocess
-from src.duckdb import execute_duckdb_query
 from src.structures import get_async_db_connection, async_conn
 from src.postgis_tiles import fetch_mvt_tile
 from ..dependencies.layer_describer import LayerDescriber, get_layer_describer
-from ..dependencies.chat_completions import ChatArgsProvider, get_chat_args_provider
 from opentelemetry import trace
 from src.dependencies.base_map import get_base_map_provider
 from src.utils import generate_id
@@ -372,36 +368,13 @@ async def get_layer_cog_tif(
 async def get_layer_pmtiles(
     request: Request,
     layer: MapLayer = Depends(get_layer),
-    session: UserContext = Depends(verify_session_required),
 ):
-    async with get_async_db_connection() as conn:
-        # Check if layer is a vector type
-        if layer.type != "vector":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Layer is not a vector type. PMTiles can only be generated from vector data.",
-            )
-
-        # Check if layer is associated with any maps via the layers array
-        map_result = await conn.fetchrow(
-            """
-            SELECT m.id, p.link_accessible, m.owner_uuid, m.project_id
-            FROM user_mundiai_maps m
-            JOIN user_mundiai_projects p ON m.project_id = p.id
-            WHERE $1 = ANY(m.layers) AND m.soft_deleted_at IS NULL
-            """,
-            layer.layer_id,
+    # Check if layer is a vector type
+    if layer.type != "vector":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Layer is not a vector type. PMTiles can only be generated from vector data.",
         )
-
-        if map_result and not map_result["link_accessible"]:
-            # If not publicly accessible, verify that we have auth
-            # NOTE: owner_uuid is <class 'asyncpg.pgproto.pgproto.UUID'>
-            if session.get_user_id() != str(map_result["owner_uuid"]):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Authentication required",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
 
     # Set up S3 client and bucket
     bucket_name = get_bucket_name()
@@ -710,40 +683,44 @@ async def get_layer_geojson(
             detail="Layer is not a vector type. GeoJSON format is only available for vector data.",
         )
 
-    # Retrieve the vector data
-    bucket_name = get_bucket_name()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Get file extension from s3_key
-        s3_key = layer.s3_key
-        file_extension = os.path.splitext(s3_key)[1]
-
-        local_input_file = os.path.join(
-            temp_dir, f"layer_{layer.layer_id}_input{file_extension}"
+    # Handle remote URLs and S3 storage uniformly, but keep PostGIS separate
+    if layer.type == "postgis":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PostGIS layers not yet supported for GeoJSON export.",
         )
 
-        # Download from S3 using async client
-        s3 = await get_async_s3_client()
-        await s3.download_file(bucket_name, s3_key, local_input_file)
+    # Get unified OGR source (works for S3 and remote URLs)
+    async with await layer.get_ogr_source() as ogr_source:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Convert to GeoJSON using ogr2ogr with unified source
+            local_geojson_file = os.path.join(
+                temp_dir, f"layer_{layer.layer_id}.geojson"
+            )
+            ogr_cmd = [
+                "ogr2ogr",
+                "-f",
+                "GeoJSON",
+                "-t_srs",
+                "EPSG:4326",  # Ensure coordinates are in WGS84
+                "-lco",
+                "COORDINATE_PRECISION=6",  # ~1m precision at equator
+                "-skipfailures",  # Skip features with NULL geometries or other issues
+                local_geojson_file,
+                ogr_source,
+            ]
 
-        # Convert to GeoJSON using ogr2ogr
-        local_geojson_file = os.path.join(temp_dir, f"layer_{layer.layer_id}.geojson")
-        ogr_cmd = [
-            "ogr2ogr",
-            "-f",
-            "GeoJSON",
-            "-t_srs",
-            "EPSG:4326",  # Ensure coordinates are in WGS84
-            "-lco",
-            "COORDINATE_PRECISION=6",  # ~1m precision at equator
-            "-skipfailures",  # Skip features with NULL geometries or other issues
-            local_geojson_file,
-            local_input_file,
-        ]
-        subprocess.run(ogr_cmd, check=True)
+            process = await asyncio.create_subprocess_exec(*ogr_cmd)
+            await process.wait()
+            if process.returncode != 0:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to convert layer to GeoJSON format",
+                )
 
-        # Read the GeoJSON file and return it
-        with open(local_geojson_file, "r") as f:
-            geojson_content = f.read()
+            # Read the GeoJSON file and return it
+            with open(local_geojson_file, "r") as f:
+                geojson_content = f.read()
 
         # Return the GeoJSON with appropriate headers and cache control
         return Response(
@@ -757,146 +734,6 @@ async def get_layer_geojson(
         )
 
 
-KUE_SQL_SYSTEM_PROMPT = """
-You are an AI assistant that is converting natural language queries to SQL for DuckDB with spatial extension.
-The user is viewing a GIS attribute table, and will type ad-hoc into an input text box. You are to
-write a DuckDB SQL query that will automatically be executed and the results will be shown to them in
-the attribute table. DuckDB is read-only.
-
-<QueryInstructions>
-In your SELECT statement, list out the columns explicitly, most important first. DO NOT `SELECT * FROM ...`.
-This is because the user has limited screen space, and some columns are more interesting than others.
-
-ONLY quote column names that have colons in them, e.g. "name:en" vs CountryCode (no quotes).
-
-If the user message is empty, give a SQL query that would best display table data.
-Generally limit your SQL query to 6 columns, as more is too much to display.
-
-DO NOT INCLUDE Geometry / geom columns in the SELECT statement.
-</QueryInstructions>
-
-<Columns>
-Shape__Area and Shape__Length are generally useless unless the user asks for them.
-</Columns>
-
-<ResponseFormat>
-Begin IMMEDIATELY with SQL.
-NEVER preface or suffix with English.
-NEVER use ` or ``` to begin the SQL.
-NEVER add comments like #, --, //, or /*.
-
-Use newlines to wrap text at 80 characters and use tabs to indent semantically.
-However, do not put each column on a new line, as it takes up too much vertical height.
-This is the perfect sweet spot:
-
-SELECT foo, bar, baz
-FROM FROM Lexample
-WHERE col LIKE '%test%'
-    AND baz = 'qux'
-LIMIT 10;
-
-</ResponseFormat>
-"""
-
-
-class LayerQueryRequest(BaseModel):
-    natural_language_query: str
-    max_n_rows: int = 20
-
-
-@layer_router.post(
-    "/layer/{layer_id}/query",
-    operation_id="query_layer",
-)
-async def query_layer(
-    request: Request,
-    body: LayerQueryRequest,
-    layer: MapLayer = Depends(get_layer),
-    session: UserContext = Depends(verify_session_required),
-    layer_describer: LayerDescriber = Depends(get_layer_describer),
-    chat_args: ChatArgsProvider = Depends(get_chat_args_provider),
-):
-    natural_language_query = body.natural_language_query
-    max_n_rows = min(body.max_n_rows, 25)  # Cap at 25 rows
-
-    # Check if schema info is cached in Redis
-    schema_info = redis.get(f"vector_schema:{layer.layer_id}:duckdb")
-    if not schema_info:
-        # ~0.5 seconds
-        schema_info = await describe_layer_internal(
-            layer.layer_id, layer_describer, session.get_user_id()
-        )
-
-        # 5 minute expiry
-        redis.set(
-            f"vector_schema:{layer.layer_id}:duckdb",
-            schema_info,
-            ex=5 * 60,
-        )
-
-    # Generate SQL from natural language query using async client
-    client = get_openai_client(request)
-
-    sql_messages = [
-        {
-            "role": "system",
-            "content": KUE_SQL_SYSTEM_PROMPT,
-        },
-        {
-            "role": "system",
-            "content": f"""
-The table name representing the layer is {layer.layer_id}.
-
-The column names are from "Attribute Fields" in the table schema.
-DO NOT select column names that are not listed. Do not assume there
-is a primary key column like ID or id, unless it's affirmatively listed.
-
-<TableSchema>
-{schema_info}
-</TableSchema>
-""",
-        },
-        {
-            "role": "user",
-            "content": natural_language_query,
-        },
-    ]
-
-    # Loop in case we see an error or two
-    for _ in range(2):
-        # ~1.4 seconds
-        chat_completions_args = await chat_args.get_args(
-            session.get_user_id(), "query_layer"
-        )
-        response = await client.chat.completions.create(
-            **chat_completions_args,
-            messages=sql_messages,
-            max_completion_tokens=512,
-        )
-
-        sql_query = response.choices[0].message.content.strip()
-
-        # Use the execute_duckdb_query function from src/duckdb.py
-        try:
-            # ~1.1 seconds
-            result = await execute_duckdb_query(sql_query, layer.layer_id, max_n_rows)
-            return result
-
-        except (duckdb.duckdb.BinderException, duckdb.duckdb.CatalogException) as e:
-            sql_messages.append(
-                {
-                    "role": "system",
-                    "content": f"<SQLQueryError> {e} </SQLQueryError> Fix your above query.",
-                }
-            )
-            print("error", e, "trying again")
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="An error occurred while executing the SQL query",
-            )
-
-
 async def describe_layer_internal(
     layer_id: str,
     layer_describer: LayerDescriber,
@@ -906,7 +743,7 @@ async def describe_layer_internal(
         layer = await conn.fetchrow(
             """
             SELECT layer_id, name, type, metadata, bounds, geometry_type,
-                   created_on, last_edited, feature_count, s3_key,
+                   created_on, last_edited, feature_count, s3_key, remote_url,
                    postgis_query, postgis_connection_id
             FROM map_layers
             WHERE layer_id = $1

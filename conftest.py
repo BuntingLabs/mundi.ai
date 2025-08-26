@@ -78,7 +78,7 @@ async def auth_client(client):
     yield client
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 async def test_map_with_vector_layers(auth_client):
     map_payload = {
         "title": "Geoprocessing Test Map",
@@ -205,3 +205,20 @@ def pytest_configure(config):
         "markers", "postgres: mark test as requiring PostgreSQL access"
     )
     config.addinivalue_line("markers", "anyio: mark a test as asynchronous using AnyIO")
+
+    # monkey patch ssl.create_default_context to use a cached version
+    # ssl.py create_default_context takes a HUGE amount of time with openssl v3.0.0,
+    # and it's a known issue: https://github.com/python/cpython/issues/95031
+    # https://github.com/psf/requests/pull/6667
+    # https://github.com/boto/botocore/issues/3171
+    # this saves like 10 seconds of clock time on tests...
+    import ssl
+    from functools import lru_cache
+
+    original_create_default_context = ssl.create_default_context
+
+    @lru_cache(maxsize=8)
+    def cached_create_default_context(*args, **kwargs):
+        return original_create_default_context(*args, **kwargs)
+
+    ssl.create_default_context = cached_create_default_context

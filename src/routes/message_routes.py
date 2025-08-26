@@ -53,7 +53,6 @@ from src.routes.layer_router import (
     set_layer_style as set_layer_style_route,
     SetStyleRequest,
 )
-from src.dependencies.dag import get_layer
 from src.structures import (
     async_conn,
     SanitizedMessage,
@@ -441,110 +440,107 @@ async def run_geoprocessing_tool(
 
     with tracer.start_as_current_span(f"geoprocessing.{algorithm_id}") as span:
         try:
-            input_params = {}
-            input_urls = {}
-
-            for key, val in mapped_args.items():
-                if key == "OUTPUT":
-                    continue
-                elif is_layer_id(val):
-                    # TODO: fetch type, and if its postgis, fetch the value from postgis
-                    # This is a layer ID, get the S3 key from database and create presigned URL
-                    layer_data = await conn.fetchrow(
-                        """
-                        SELECT s3_key, type FROM map_layers
-                        WHERE layer_id = $1 AND owner_uuid = $2
-                        """,
-                        val,
-                        user_id,
-                    )
-
-                    if not layer_data or not layer_data["s3_key"]:
-                        raise RecoverableToolCallError(
-                            f"Layer {val} not found or has no S3 key",
-                            tool_call.id,
-                        )
-
-                    if layer_data["type"] == "postgis":
-                        raise RecoverableToolCallError(
-                            f"Layer {val} is from a PostGIS connection, not yet supported by geoprocessing",
-                            tool_call.id,
-                        )
-
-                    s3_client = await get_async_s3_client()
-                    bucket_name = get_bucket_name()
-                    presigned_url = await s3_client.generate_presigned_url(
-                        "get_object",
-                        Params={"Bucket": bucket_name, "Key": layer_data["s3_key"]},
-                        ExpiresIn=3600,
-                    )
-                    input_urls[key] = presigned_url
-                else:
-                    input_params[key] = str(val)
-
-            map_data = await conn.fetchrow(
-                """
-                SELECT project_id FROM user_mundiai_maps
-                WHERE id = $1
-                """,
-                map_id,
-            )
-            project_id = map_data["project_id"]
-
-            output_layer_mappings = {}
-
-            # Generate presigned PUT URLs for all output parameters
-            s3_client = await get_async_s3_client()
-            bucket_name = get_bucket_name()
-            output_presigned_put_urls = {}
-
-            # Generate output layer ID and S3 key for this output
-            output_layer_id = generate_id(prefix="L")
-            # Determine file extension based on tool description
-            tool_description = tool_def["function"]["description"].lower()
-            vector_count = tool_description.count("vector")
-            raster_count = tool_description.count("raster")
-
-            if vector_count > raster_count:
-                file_extension = ".fgb"
-                layer_type = "vector"
-            else:
-                file_extension = ".tif"
-                layer_type = "raster"
-
-            output_s3_key = (
-                f"uploads/{user_id}/{project_id}/{output_layer_id}{file_extension}"
-            )
-
-            # Generate presigned PUT URL for this output
-            output_presigned_url = await s3_client.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": bucket_name,
-                    "Key": output_s3_key,
-                    "ContentType": "application/x-www-form-urlencoded",
-                },
-                ExpiresIn=3600,  # 1 hour
-            )
-
-            output_presigned_put_urls["OUTPUT"] = output_presigned_url
-            output_layer_mappings["OUTPUT"] = {
-                "layer_id": output_layer_id,
-                "s3_key": output_s3_key,
-                "layer_type": layer_type,
-                "file_extension": file_extension,
-            }
-
-            qgis_request = {
-                "algorithm_id": algorithm_id,
-                "qgis_inputs": input_params,
-                "output_presigned_put_urls": output_presigned_put_urls,
-                "input_urls": input_urls,
-            }
-
-            async with kue_ephemeral_action(
-                conversation_id, f"QGIS running {algorithm_id}..."
+            async with (
+                kue_ephemeral_action(
+                    conversation_id, f"QGIS running {algorithm_id}..."
+                ),
+                async_conn("get_layer_for_geoprocessing") as conn,
             ):
+                input_params = {}
+                input_urls = {}
+
+                for key, val in mapped_args.items():
+                    if key == "OUTPUT":
+                        continue
+                    elif is_layer_id(val):
+                        # Get OGR source for any layer type (S3, remote URL, PostGIS)
+                        try:
+                            layer_row = await conn.fetchrow(
+                                """
+                                SELECT *
+                                FROM map_layers
+                                WHERE layer_id = $1 AND owner_uuid = $2
+                                """,
+                                val,
+                                user_id,
+                            )
+                            if not layer_row:
+                                raise HTTPException(404, f"Layer {val} not found")
+                            layer = MapLayer(**dict(layer_row))
+
+                            ogr_source_context = await layer.get_ogr_source(
+                                never_return_local_file=True
+                            )
+                            async with ogr_source_context as ogr_source:
+                                input_urls[key] = ogr_source
+                        except Exception:
+                            raise RecoverableToolCallError(
+                                f"Layer {val} could not be accessed for geoprocessing",
+                                tool_call.id,
+                            )
+                    else:
+                        input_params[key] = str(val)
+
+                map_data = await conn.fetchrow(
+                    """
+                    SELECT project_id FROM user_mundiai_maps
+                    WHERE id = $1
+                    """,
+                    map_id,
+                )
+                project_id = map_data["project_id"]
+
+                output_layer_mappings = {}
+
+                # Generate presigned PUT URLs for all output parameters
+                s3_client = await get_async_s3_client()
+                bucket_name = get_bucket_name()
+                output_presigned_put_urls = {}
+
+                # Generate output layer ID and S3 key for this output
+                output_layer_id = generate_id(prefix="L")
+                # Determine file extension based on tool description
+                tool_description = tool_def["function"]["description"].lower()
+                vector_count = tool_description.count("vector")
+                raster_count = tool_description.count("raster")
+
+                if vector_count > raster_count:
+                    file_extension = ".fgb"
+                    layer_type = "vector"
+                else:
+                    file_extension = ".tif"
+                    layer_type = "raster"
+
+                output_s3_key = (
+                    f"uploads/{user_id}/{project_id}/{output_layer_id}{file_extension}"
+                )
+
+                # Generate presigned PUT URL for this output
+                output_presigned_url = await s3_client.generate_presigned_url(
+                    "put_object",
+                    Params={
+                        "Bucket": bucket_name,
+                        "Key": output_s3_key,
+                        "ContentType": "application/x-www-form-urlencoded",
+                    },
+                    ExpiresIn=3600,  # 1 hour
+                )
+
+                output_presigned_put_urls["OUTPUT"] = output_presigned_url
+                output_layer_mappings["OUTPUT"] = {
+                    "layer_id": output_layer_id,
+                    "s3_key": output_s3_key,
+                    "layer_type": layer_type,
+                    "file_extension": file_extension,
+                }
+
+                qgis_request = {
+                    "algorithm_id": algorithm_id,
+                    "qgis_inputs": input_params,
+                    "output_presigned_put_urls": output_presigned_put_urls,
+                    "input_urls": input_urls,
+                }
+
                 # Call QGIS processing service
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
@@ -597,7 +593,7 @@ async def run_geoprocessing_tool(
                         map_id=map_id,
                         file=upload_file,
                         layer_name=filename,
-                        add_layer_to_map=True,
+                        add_layer_to_map=False,
                         user_id=user_id,
                         project_id=project_id,
                     )
@@ -620,6 +616,16 @@ async def run_geoprocessing_tool(
                     "created_layers": created_layers,
                 }
 
+                # Add instructions about available layers
+                if created_layers:
+                    layer_names = [layer["layer_name"] for layer in created_layers]
+                    layer_ids = [layer["layer_id"] for layer in created_layers]
+                    result["kue_instructions"] = (
+                        f"New layers available: {', '.join(layer_names)} "
+                        f"(IDs: {', '.join(layer_ids)}), not added to map. "
+                        'Use "add_layer_to_map" with the layer_id and descriptive new_name for layers that should be visible to the user. DO NOT include feature count or CRS in name, those are already visible to the user.'
+                    )
+
                 return result
 
         except UnsupportedAlgorithmError as e:
@@ -637,7 +643,7 @@ async def run_geoprocessing_tool(
             span.set_attribute("error.traceback", traceback.format_exc())
             return {
                 "status": "error",
-                "error": f'Unexpected error running geoprocessing: "{str(e)}", this is likely a Mundi bug.',
+                "error": "Unexpected error running geoprocessing, this is likely a Mundi bug.",
                 "algorithm_id": algorithm_id,
             }
 
@@ -1482,7 +1488,20 @@ async def process_chat_interaction_task(
                                 try:
                                     layers = json.loads(maplibre_json_layers_str)
 
-                                    layer = await get_layer(layer_id, user_id)
+                                    layer_row = await conn.fetchrow(
+                                        """
+                                        SELECT *
+                                        FROM map_layers
+                                        WHERE layer_id = $1 AND owner_uuid = $2
+                                        """,
+                                        layer_id,
+                                        user_id,
+                                    )
+                                    if not layer_row:
+                                        raise HTTPException(
+                                            404, f"Layer {layer_id} not found"
+                                        )
+                                    layer = MapLayer(**dict(layer_row))
 
                                     async with kue_ephemeral_action(
                                         conversation.id,

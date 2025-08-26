@@ -258,7 +258,7 @@ interface MapLibreMapProps {
   zoomHistory: Array<{ bounds: [number, number, number, number] }>;
   zoomHistoryIndex: number;
   setZoomHistoryIndex: React.Dispatch<React.SetStateAction<number>>;
-  addError: (message: string, shouldOverrideMessages?: boolean) => void;
+  addError: (message: string, shouldOverrideMessages?: boolean, sourceId?: string) => void;
   dismissError: (errorId: string) => void;
   errors: ErrorEntry[];
   invalidateMapData: () => void;
@@ -797,7 +797,8 @@ export default function MapLibreMap({
           }
         } else {
           // Unknown type of error?
-          addError('Error loading map data: ' + e.error.message, true);
+          const sourceId = 'sourceId' in e && typeof e.sourceId === 'string' ? e.sourceId : undefined;
+          addError('Error loading map data: ' + e.error.message, true, sourceId);
         }
       });
 
@@ -1084,9 +1085,6 @@ export default function MapLibreMap({
         if (response.ok) {
           const data = await response.json();
           setAvailableBasemaps(data.styles);
-          if (data.styles.length > 0) {
-            setCurrentBasemap(data.styles[0]); // Set first style as default
-          }
         }
       } catch (error) {
         console.error('Error fetching available basemaps:', error);
@@ -1116,8 +1114,10 @@ export default function MapLibreMap({
   // Add globe control when map and basemaps are available
   useEffect(() => {
     const map = localMapRef.current;
-    if (map && availableBasemaps.length > 0 && currentBasemap && !globeControlRef.current) {
-      const globeControl = new GlobeControl(availableBasemaps, currentBasemap, handleBasemapChange);
+    if (map && availableBasemaps.length > 0 && !globeControlRef.current) {
+      // Use first available basemap as the initial display value
+      const initialBasemap = currentBasemap || availableBasemaps[0];
+      const globeControl = new GlobeControl(availableBasemaps, initialBasemap, handleBasemapChange);
       globeControlRef.current = globeControl;
       map.addControl(globeControl);
     }
@@ -1191,6 +1191,7 @@ export default function MapLibreMap({
             demoConfig={demoConfig}
             hiddenLayerIDs={hiddenLayerIDs}
             toggleLayerVisibility={toggleLayerVisibility}
+            errors={errors}
           />
         )}
         {selectedFeature && (

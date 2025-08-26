@@ -18,6 +18,7 @@ export interface ErrorEntry {
   message: string;
   timestamp: Date;
   shouldOverrideMessages: boolean;
+  sourceId?: string;
 }
 
 // Add interface for tracking upload progress

@@ -15,6 +15,7 @@
 
 import pytest
 import json
+import os
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -75,6 +76,43 @@ async def test_map_with_osm_layer(auth_client):
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
     return {"map_id": map_id}
+
+
+@pytest.fixture
+async def test_map_with_idaho_layer(auth_client):
+    map_payload = {
+        "title": "Idaho Test Map",
+        "description": "Test map with Idaho layer for style testing",
+    }
+    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
+    current_map_id = map_response.json()["id"]
+
+    file_path = str(
+        Path(__file__).parent.parent / "test_fixtures" / "idaho_weatherstations.geojson"
+    )
+    if not os.path.exists(file_path):
+        pytest.skip(f"Test file {file_path} not found")
+
+    with open(file_path, "rb") as f:
+        layer_response = await auth_client.post(
+            f"/api/maps/{current_map_id}/layers",
+            files={
+                "file": ("idaho_weatherstations.geojson", f, "application/octet-stream")
+            },
+            data={"layer_name": "Idaho Weather Stations"},
+        )
+        assert layer_response.status_code == 200, (
+            f"Failed to upload layer: {layer_response.text}"
+        )
+        response_data = layer_response.json()
+        layer_id = response_data["id"]
+        child_map_id = response_data["dag_child_map_id"]
+
+    return {
+        "map_id": child_map_id,
+        "layer_id": layer_id,
+    }
 
 
 @pytest.mark.anyio
@@ -168,9 +206,9 @@ async def test_mbgl_barcelona(test_map_with_vector_layers, auth_client):
 
 
 @pytest.mark.anyio
-async def test_mbgl_idaho(test_map_with_vector_layers, auth_client):
-    map_id = test_map_with_vector_layers["map_id"]
-    layer_id = test_map_with_vector_layers["idaho_stations_layer_id"]
+async def test_mbgl_idaho(test_map_with_idaho_layer, auth_client):
+    map_id = test_map_with_idaho_layer["map_id"]
+    layer_id = test_map_with_idaho_layer["layer_id"]
     maplibre_style = [
         {
             "id": "station_circles",

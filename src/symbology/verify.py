@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import subprocess
+import asyncio
 import tempfile
 import os
 import json
@@ -28,19 +28,24 @@ class StyleValidationError(Exception):
         super().__init__(self.message)
 
 
-def verify_full_style_json_str(style_json_str: str) -> bool:
+async def verify_full_style_json_str(style_json_str: str) -> bool:
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_file:
         temp_path = temp_file.name
         temp_file.write(style_json_str.encode("utf-8"))
         temp_file.flush()
 
     try:
-        result = subprocess.run(
-            ["gl-style-validate", temp_path], capture_output=True, text=True
+        process = await asyncio.create_subprocess_exec(
+            "gl-style-validate",
+            temp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
-        if result.returncode != 0:
-            raise StyleValidationError(result.stdout)
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            raise StyleValidationError(stdout.decode("utf-8"))
 
         return True
     finally:
@@ -83,6 +88,6 @@ async def verify_style_json_str(
         override_layers=json.dumps({layer.layer_id: layers}),
     )
 
-    verify_full_style_json_str(json.dumps(style_json))
+    await verify_full_style_json_str(json.dumps(style_json))
 
     return True

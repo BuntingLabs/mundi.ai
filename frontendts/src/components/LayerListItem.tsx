@@ -41,6 +41,7 @@ interface LayerListItemProps {
   };
   isVisible?: boolean;
   onToggleVisibility?: (layerId: string) => void;
+  title?: string;
 }
 
 export const LayerListItem: React.FC<LayerListItemProps> = ({
@@ -59,6 +60,7 @@ export const LayerListItem: React.FC<LayerListItemProps> = ({
   dropdownActions = {},
   isVisible = true,
   onToggleVisibility,
+  title,
 }) => {
   let liClassName = '';
 
@@ -87,6 +89,7 @@ export const LayerListItem: React.FC<LayerListItemProps> = ({
       <DropdownMenuTrigger asChild>
         <button
           className={`${liClassName} flex items-center justify-between px-2 py-1 gap-2 cursor-pointer group w-full text-left ${className}`}
+          title={title}
           onClick={(e) => {
             console.log('LayerListItem clicked:', { name, e });
             onClick?.(e);

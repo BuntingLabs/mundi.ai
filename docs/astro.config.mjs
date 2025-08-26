@@ -30,13 +30,27 @@ export default defineConfig({
 					items: [
 						{ label: 'Making your first map', slug: 'getting-started/making-your-first-map' },
 						{ label: 'Uploading files', slug: 'getting-started/uploading-files' },
-						{ label: 'Connecting to a demo database', slug: 'getting-started/connecting-to-demo-postgis' },
+						{
+							label: 'Remote sources',
+							collapsed: true,
+							items: [
+								{ label: 'WFS', slug: 'getting-started/add-ogc-wfs-web-feature-service' },
+								{ label: 'ESRI Feature Server', slug: 'getting-started/esri-feature-server' },
+								{ label: 'Google Sheets', slug: 'getting-started/google-sheets' },
+							],
+						},
+					],
+				},
+				{
+					label: 'Spatial databases',
+					items: [
+						{ label: 'Connecting to PostGIS', slug: 'spatial-databases/connecting-to-postgis' },
+						{ label: 'Querying and styling from SQL', slug: 'spatial-databases/querying-and-styling-from-sql' },
 					],
 				},
 				{
 					label: 'Guides',
 					items: [
-						{ label: 'Connecting to PostGIS', slug: 'guides/connecting-to-postgis' },
 						{ label: 'Geoprocessing from QGIS', slug: 'guides/geoprocessing-from-qgis' },
 						{ label: 'Visualizing point clouds', slug: 'guides/visualizing-point-clouds-las-laz' },
 						{ label: 'Satellite basemaps', slug: 'guides/switching-basemaps-satellite-or-traditional-vector' },
@@ -114,6 +128,8 @@ You can try Mundi free at https://app.mundi.ai or self-host using Docker Compose
 	// prevent old routes from 404'ing
 	redirects: {
 		'/advanced/on-premise-vpc-kubernetes-deployment': '/deployments/on-premise-vpc-kubernetes-deployment',
+		'/getting-started/connecting-to-demo-postgis': '/spatial-databases/working-with-database',
+		'/guides/connecting-to-postgis': '/spatial-databases/connecting-to-postgis',
 		'/guides/self-hosting-mundi': '/deployments/self-hosting-mundi'
 	}
 });

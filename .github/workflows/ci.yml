@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      with:
+        persist-credentials: false
+
+    - name: Initialize submodules
+      run: git submodule update --init --recursive
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@d70bba72b1f3fd22344832f00baa16ece964efeb # v3.3.0
+
+    - name: Build application images
+      run: |
+        docker buildx bake \
+          --set app.cache-from=type=gha \
+          --set driftdb.cache-from=type=gha \
+          --set qgis-processing.cache-from=type=gha \
+          --set app.args.VITE_WEBSITE_DOMAIN=http://localhost:8000 \
+          --set app.args.VITE_EMAIL_VERIFICATION=disable \
+          --file docker-compose.yml \
+          --load
+      timeout-minutes: 20
+
+    - name: Run tests
+      run: docker compose run app pytest -xvs -n auto
+      timeout-minutes: 8

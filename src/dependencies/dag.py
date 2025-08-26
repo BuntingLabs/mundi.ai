@@ -20,7 +20,6 @@ from src.structures import async_conn
 from src.dependencies.session import (
     UserContext,
     verify_session_required,
-    session_user_id,
 )
 from src.dag import generate_id, ForkReason
 
@@ -140,19 +139,15 @@ async def get_map(
 
 async def get_layer(
     layer_id: str = Path(...),
-    user_id: str = Depends(session_user_id),
 ) -> MapLayer:
-    """Get a layer that the user owns"""
-
     async with async_conn("get_layer") as conn:
         layer_row = await conn.fetchrow(
             """
             SELECT *
             FROM map_layers
-            WHERE layer_id = $1 AND owner_uuid = $2
+            WHERE layer_id = $1
             """,
             layer_id,
-            user_id,
         )
         if not layer_row:
             raise HTTPException(404, f"Layer {layer_id} not found")

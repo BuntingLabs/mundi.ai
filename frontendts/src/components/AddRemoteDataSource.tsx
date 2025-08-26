@@ -2,6 +2,7 @@
 
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import React, { useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -10,12 +11,15 @@ import { Input } from '@/components/ui/input';
 interface AddRemoteDataSourceProps {
   isOpen: boolean;
   onClose: () => void;
-  projectId?: string;
+  mapId?: string;
   onSuccess?: () => void;
 }
 
-export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen, onClose, projectId, onSuccess }) => {
+export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen, onClose, mapId, onSuccess }) => {
+  const navigate = useNavigate();
+  const { projectId } = useParams<{ projectId: string }>();
   const [form, setForm] = useState({
+    layerName: '',
     url: '',
     layerType: 'vector' as 'vector' | 'raster',
   });
@@ -23,8 +27,13 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
   const [error, setError] = useState<string | null>(null);
 
   const handleConnect = async () => {
-    if (!projectId) {
-      toast.error('No project ID available');
+    if (!mapId) {
+      toast.error('No map ID available');
+      return;
+    }
+
+    if (!form.layerName.trim()) {
+      setError('Please provide a layer name');
       return;
     }
 
@@ -37,22 +46,31 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
     setError(null);
 
     try {
-      // TODO: Replace with actual API endpoint when backend is implemented
-      const response = await fetch(`/api/projects/${projectId}/remote-layers`, {
+      const response = await fetch(`/api/maps/${mapId}/layers/remote`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           url: form.url,
-          layer_type: form.layerType,
+          name: form.layerName,
+          add_layer_to_map: true,
+          source_type: form.layerType,
         }),
       });
 
       if (response.ok) {
+        const data = await response.json();
         toast.success('Remote layer added successfully!');
         handleClose();
         onSuccess?.();
+
+        // Navigate to the new child map if dag_child_map_id is present
+        if (data.dag_child_map_id && projectId) {
+          setTimeout(() => {
+            navigate(`/project/${projectId}/${data.dag_child_map_id}`);
+          }, 1000);
+        }
       } else {
         const errorData = await response.json().catch(() => ({ detail: response.statusText }));
         setError(errorData.detail || response.statusText);
@@ -66,6 +84,7 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
 
   const handleClose = () => {
     setForm({
+      layerName: '',
       url: '',
       layerType: 'vector',
     });
@@ -86,19 +105,37 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
         <DialogHeader>
           <DialogTitle>Add Remote Layer</DialogTitle>
           <DialogDescription>
-            Add a layer from a remote URL. Supports various formats including Cloud Optimized GeoTIFFs and Protomaps.
+            Add a layer from a remote URL. Supports various formats including Cloud Optimized GeoTIFFs and vector data.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 py-4">
+          <div className="space-y-2">
+            <label htmlFor="layer-name" className="text-sm font-medium">
+              Layer Name
+            </label>
+            <Input
+              id="layer-name"
+              placeholder="Enter a name for this layer"
+              value={form.layerName}
+              onChange={(e) => {
+                setForm((prev) => ({
+                  ...prev,
+                  layerName: e.target.value,
+                }));
+                setError(null);
+              }}
+            />
+          </div>
+
           {/* Layer Type Toggle */}
-          <div className="flex space-x-2">
+          <div className="grid grid-cols-2 gap-2">
             <Button
               type="button"
               variant={form.layerType === 'vector' ? 'default' : 'outline'}
               size="sm"
               onClick={() => setForm((prev) => ({ ...prev, layerType: 'vector' }))}
-              className="flex-1 hover:cursor-pointer"
+              className="hover:cursor-pointer"
             >
               Vector
             </Button>
@@ -107,7 +144,7 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
               variant={form.layerType === 'raster' ? 'default' : 'outline'}
               size="sm"
               onClick={() => setForm((prev) => ({ ...prev, layerType: 'raster' }))}
-              className="flex-1 hover:cursor-pointer"
+              className="hover:cursor-pointer"
             >
               Raster
             </Button>
@@ -120,7 +157,7 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
               </label>
               <Input
                 id="vector-url"
-                placeholder="https://example.com/data.pmtiles or https://example.com/data.geojson"
+                placeholder="https://example.com/data.geojson or https://example.com/data.fgb"
                 value={form.url}
                 onChange={(e) => {
                   setForm((prev) => ({
@@ -130,7 +167,7 @@ export const AddRemoteDataSource: React.FC<AddRemoteDataSourceProps> = ({ isOpen
                   setError(null);
                 }}
               />
-              <p className="text-xs text-gray-600 dark:text-gray-400">Supports Protomaps .pmtiles, GeoJSON, and other vector formats</p>
+              <p className="text-xs text-gray-600 dark:text-gray-400">Supports GeoJSON, FlatGeobuf, and other vector formats</p>
             </div>
           ) : (
             <div className="space-y-2">

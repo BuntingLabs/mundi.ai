@@ -44,6 +44,7 @@ are loaded entirely into memory in the browser, so we highly recommend downsampl
 
 Mundi accepts `.csv` files where each row represents a point. Your CSV must have a header row with column names
 that separate out latitude and longitude columns with coordinates in WGS84 / EPSG:4326.
+[You can also connect directly to Google sheets](/getting-started/google-sheets/).
 
 For example, this CSV would successfully upload to Mundi:
 

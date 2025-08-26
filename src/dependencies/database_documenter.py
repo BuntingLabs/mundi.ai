@@ -67,7 +67,7 @@ class DefaultDatabaseDocumenter(DatabaseDocumenter):
     ) -> Tuple[str, str]:
         """
         Generate basic database documentation and friendly name.
-        This function analyzes the PostgreSQL database schema (equivalent to \d+)
+        This function analyzes the PostgreSQL database schema (equivalent to \\d+)
         and generates a friendly display name and simple documentation.
         """
         try:

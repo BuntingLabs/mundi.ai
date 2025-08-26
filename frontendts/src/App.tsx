@@ -3,20 +3,20 @@
 import { cogProtocol } from '@geomatico/maplibre-cog-protocol';
 import maplibregl from 'maplibre-gl';
 import { Protocol } from 'pmtiles';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import * as reactRouterDom from 'react-router-dom';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { SuperTokensWrapper } from 'supertokens-auth-react';
 import { EmailPasswordPreBuiltUI } from 'supertokens-auth-react/recipe/emailpassword/prebuiltui';
 import { EmailVerificationPreBuiltUI } from 'supertokens-auth-react/recipe/emailverification/prebuiltui';
-import Session, { SessionAuth } from 'supertokens-auth-react/recipe/session';
+import { SessionAuth } from 'supertokens-auth-react/recipe/session';
 import { getSuperTokensRoutesForReactRouterDom } from 'supertokens-auth-react/ui';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { Toaster } from '@/components/ui/sonner';
 import MapsList from './components/MapsList';
 import ProjectView from './components/ProjectView';
-import { ProjectState } from './lib/types';
+import { ProjectsProvider } from './contexts/ProjectsContext';
 import PostGISDocumentation from './pages/PostGISDocumentation';
 import './App.css';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -33,11 +33,6 @@ if (emailVerificationMode !== 'require' && emailVerificationMode !== 'disable') 
 const emailVerificationEnabled = emailVerificationMode === 'require';
 
 function AppContent() {
-  const [projectState, setProjectState] = useState<ProjectState>({
-    type: 'not_logged_in',
-  });
-  const sessionContext = Session.useSessionContext();
-
   useEffect(() => {
     const protocol = new Protocol();
     maplibregl.addProtocol('pmtiles', protocol.tile);
@@ -48,73 +43,46 @@ function AppContent() {
     };
   }, []);
 
-  useEffect(() => {
-    if (sessionContext.loading) {
-      return;
-    }
-
-    if (!sessionContext.doesSessionExist) {
-      setProjectState({ type: 'not_logged_in' });
-      return;
-    }
-
-    setProjectState({ type: 'loading' });
-
-    const fetchProjects = async () => {
-      try {
-        const response = await fetch('/api/projects/');
-        if (!response.ok) {
-          throw new Error('Failed to fetch projects');
-        }
-        const data = await response.json();
-        setProjectState({ type: 'loaded', projects: data.projects || [] });
-      } catch (error) {
-        console.error('Error fetching projects:', error);
-        setProjectState({ type: 'loaded', projects: [] });
-      }
-    };
-
-    fetchProjects();
-  }, [sessionContext]);
-
   return (
     <BrowserRouter>
       <SidebarProvider className="z-50">
-        <AppSidebar projects={projectState} />
+        <ProjectsProvider>
+          <AppSidebar />
 
-        <Routes>
-          {/* SuperTokens Routes for authentication UI */}
-          {getSuperTokensRoutesForReactRouterDom(
-            reactRouterDom,
-            emailVerificationEnabled ? [EmailPasswordPreBuiltUI, EmailVerificationPreBuiltUI] : [EmailPasswordPreBuiltUI],
-          )}
+          <Routes>
+            {/* SuperTokens Routes for authentication UI */}
+            {getSuperTokensRoutesForReactRouterDom(
+              reactRouterDom,
+              emailVerificationEnabled ? [EmailPasswordPreBuiltUI, EmailVerificationPreBuiltUI] : [EmailPasswordPreBuiltUI],
+            )}
 
-          {/* App Routes */}
-          <Route
-            path="/"
-            element={
-              <SessionAuth>
-                <MapsList />
-              </SessionAuth>
-            }
-          />
-          <Route
-            path="/project/:projectId/:versionIdParam?"
-            element={
-              <SessionAuth>
-                <ProjectView />
-              </SessionAuth>
-            }
-          />
-          <Route
-            path="/postgis/:connectionId"
-            element={
-              <SessionAuth>
-                <PostGISDocumentation />
-              </SessionAuth>
-            }
-          />
-        </Routes>
+            {/* App Routes */}
+            <Route
+              path="/"
+              element={
+                <SessionAuth>
+                  <MapsList />
+                </SessionAuth>
+              }
+            />
+            <Route
+              path="/project/:projectId/:versionIdParam?"
+              element={
+                <SessionAuth>
+                  <ProjectView />
+                </SessionAuth>
+              }
+            />
+            <Route
+              path="/postgis/:connectionId"
+              element={
+                <SessionAuth>
+                  <PostGISDocumentation />
+                </SessionAuth>
+              }
+            />
+          </Routes>
+        </ProjectsProvider>
       </SidebarProvider>
     </BrowserRouter>
   );

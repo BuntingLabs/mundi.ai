@@ -121,7 +121,7 @@ export default function ProjectView() {
   const processedBoundsActionIds = useRef<Set<string>>(new Set());
 
   // Helper function to add a new error
-  const addError = useCallback((message: string, shouldOverrideMessages: boolean = false) => {
+  const addError = useCallback((message: string, shouldOverrideMessages: boolean = false, sourceId?: string) => {
     setErrors((prevErrors) => {
       // if it already exists, bail out
       if (prevErrors.some((err) => err.message === message)) return prevErrors;
@@ -131,6 +131,7 @@ export default function ProjectView() {
         message,
         timestamp: new Date(),
         shouldOverrideMessages,
+        sourceId,
       };
 
       console.error(message);

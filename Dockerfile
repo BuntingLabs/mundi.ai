@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-dev libexpat1-dev libcurl4-openssl-dev \
         zlib1g-dev libtiff-dev libgeotiff-dev libpng-dev libjpeg-dev \
         python3-dev python3-numpy python3-setuptools \
+        libpq-dev \
     && rm -rf /var/lib/apt/lists/* \
     && wget https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz \
     && tar -xzf gdal-${GDAL_VERSION}.tar.gz \
@@ -34,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         -DBUILD_APPS=ON \
         -DGDAL_BUILD_OPTIONAL_DRIVERS=ON \
         -DOGR_BUILD_OPTIONAL_DRIVERS=ON \
+        -DGDAL_USE_POSTGRESQL=ON \
     && cmake --build . -j$(nproc) \
     && cmake --build . --target install \
     && ldconfig \
@@ -62,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         proj-bin libproj-dev libproj25 proj-data \
         libsqlite3-0 libexpat1 libcurl4 \
         zlib1g libtiff6 libgeotiff5 libpng16-16 libjpeg62-turbo \
+        libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 # fetch GDAL stuff from builder
@@ -70,6 +73,7 @@ COPY --from=gdal-builder /usr/local/bin/ogr* /usr/local/bin/
 COPY --from=gdal-builder /usr/local/bin/nearblack /usr/local/bin/
 COPY --from=gdal-builder /usr/local/bin/gdaldem /usr/local/bin/
 COPY --from=gdal-builder /usr/local/lib/libgdal* /usr/local/lib/
+COPY --from=gdal-builder /usr/local/lib/gdalplugins /usr/local/lib/gdalplugins
 COPY --from=gdal-builder /usr/local/lib/python3*/dist-packages/osgeo /usr/local/lib/python3.11/dist-packages/osgeo
 COPY --from=gdal-builder /usr/local/share/gdal /usr/local/share/gdal
 RUN ldconfig
@@ -177,6 +181,7 @@ ENV DISPLAY=:99 \
     LANG=en_US.UTF-8 \
     PYTHONPATH="/app:/usr/local/lib/python3.11/dist-packages:/usr/lib/python3/dist-packages" \
     LD_LIBRARY_PATH="/usr/local/lib:/usr/lib" \
-    GDAL_DATA="/usr/local/share/gdal"
+    GDAL_DATA="/usr/local/share/gdal" \
+    GDAL_DRIVER_PATH="/usr/local/lib/gdalplugins"
 
 CMD ["python", "-m", "src.wsgi"]
