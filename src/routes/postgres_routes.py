@@ -19,26 +19,31 @@ import math
 import secrets
 import json
 import csv
-from io import StringIO
+import datetime
+from io import StringIO, BytesIO
+from pathlib import Path
+from urllib.parse import urlparse
+import aiohttp
+import fiona
 from fastapi import (
     APIRouter,
     HTTPException,
     status,
     Request,
     Depends,
+    Query,
 )
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from src.dependencies.dag import forked_map_by_user
+from src.dependencies.dag import forked_map_by_user, get_map, get_layer, edit_map
 from src.database.models import MundiMap, MapLayer
-from ..dependencies.session import (
+from src.dependencies.session import (
     verify_session_required,
     verify_session_optional,
     UserContext,
 )
-from typing import List, Optional
+from typing import List, Optional, Literal
 import logging
-from datetime import datetime
 from pyproj import Transformer
 from osgeo import osr
 from fastapi import File, UploadFile, Form
@@ -59,25 +64,25 @@ from osgeo import gdal
 import subprocess
 import ipaddress
 import socket
-from urllib.parse import urlparse
+import laspy
+import shutil
 from src.symbology.llm import generate_maplibre_layers_for_layer_id
 from src.routes.layer_router import describe_layer_internal
-from ..structures import get_async_db_connection, async_conn
-from ..dependencies.base_map import BaseMapProvider, get_base_map_provider
-from ..dependencies.postgis import get_postgis_provider
-from ..dependencies.layer_describer import LayerDescriber, get_layer_describer
-from ..dependencies.postgres_connection import (
+from src.structures import get_async_db_connection, async_conn
+from src.dependencies.base_map import BaseMapProvider, get_base_map_provider
+from src.dependencies.postgis import get_postgis_provider
+from src.dependencies.layer_describer import LayerDescriber, get_layer_describer
+from src.dependencies.postgres_connection import (
     PostgresConnectionManager,
     get_postgres_connection_manager,
 )
 from typing import Callable
 from opentelemetry import trace
 from src.dag import DAGEditOperationResponse
-from src.dependencies.dag import get_map, get_layer
 
-import fiona
-
-fiona.drvsupport.supported_drivers["WFS"] = "r"
+fiona.drvsupport.supported_drivers["WFS"] = "r"  # type: ignore[attr-defined]
+fiona.drvsupport.supported_drivers["PMTiles"] = "r"  # type: ignore[attr-defined]
+fiona.drvsupport.supported_drivers["KML"] = "r"  # type: ignore[attr-defined]
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +93,163 @@ redis = Redis(
     port=int(os.environ["REDIS_PORT"]),
     decode_responses=True,
 )
+
+
+class MetadataUpdates(BaseModel):
+    original_srid: Optional[int] = None
+    feature_count: Optional[int] = None
+    raster_value_stats_b1: Optional[dict] = None
+    pmtiles_key: Optional[str] = None
+    source: Optional[str] = None
+    layer_name: Optional[str] = None
+    geometry_type: Optional[str] = None
+
+
+class LayerBoundsMetadata(BaseModel):
+    bounds: Optional[List[float]] = None
+    geometry_type: str = "unknown"
+    feature_count: Optional[int] = None
+    metadata_updates: MetadataUpdates = Field(default_factory=MetadataUpdates)
+
+
+class VectorProcessingResult(BaseModel):
+    layer_id: str
+    bounds: Optional[List[float]] = None
+    geometry_type: str
+    feature_count: Optional[int] = None
+    metadata: MetadataUpdates
+    pmtiles_key: Optional[str] = None
+    maplibre_style: Optional[List[dict]] = None
+    layer_type: Literal["vector"] = "vector"
+
+
+class PointCloudPreprocessResult(BaseModel):
+    path: str
+    bounds: List[float]
+    temp_dir: str
+
+
+async def preprocess_point_cloud(
+    temp_file_path: str, metadata: dict
+) -> PointCloudPreprocessResult:
+    with tracer.start_as_current_span("internal_upload_layer.laspy"):
+        las = laspy.read(temp_file_path)
+
+        mid_x = (las.header.mins[0] + las.header.maxs[0]) / 2
+        mid_y = (las.header.mins[1] + las.header.maxs[1]) / 2
+
+        src_crs = las.header.parse_crs()
+        if src_crs is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Point cloud file (.las, .laz) does not have a CRS, which is required to display on the map",
+            )
+
+        transformer = Transformer.from_crs(src_crs, 4326, always_xy=True)
+        lon, lat = transformer.transform(mid_x, mid_y)
+        min_x, min_y, min_z = las.header.mins
+        max_x, max_y, max_z = las.header.maxs
+
+    min_lon, min_lat = transformer.transform(min_x, min_y)
+    max_lon, max_lat = transformer.transform(max_x, max_y)
+
+    bounds = [min_lon, min_lat, max_lon, max_lat]
+
+    metadata["pointcloud_anchor"] = {"lon": lon, "lat": lat}
+    metadata["pointcloud_z_range"] = [min_z, max_z]
+
+    temp_dir = tempfile.mkdtemp()
+    auxiliary_temp_file_path = os.path.join(temp_dir, "4326.laz")
+    las2las_cmd = [
+        "las2las64",
+        "-i",
+        temp_file_path,
+        "-set_version",
+        "1.3",
+        "-proj_epsg",
+        "4326",
+        "-o",
+        auxiliary_temp_file_path,
+    ]
+
+    try:
+        with tracer.start_as_current_span("internal_upload_layer.las2las"):
+            process = await asyncio.create_subprocess_exec(*las2las_cmd)
+            await process.wait()
+
+        if not os.path.exists(auxiliary_temp_file_path):
+            raise Exception("las2las did not create output file")
+        lasinfo_cmd = ["lasinfo64", auxiliary_temp_file_path]
+        lasinfo_process = await asyncio.create_subprocess_exec(
+            *lasinfo_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await lasinfo_process.wait()
+
+        if lasinfo_process.returncode != 0:
+            raise Exception(
+                f"Output file validation failed - lasinfo64 returned exit code {lasinfo_process.returncode}"
+            )
+
+    except Exception as e:
+        print(f"Error converting point cloud to EPSG:4326: {str(e)}")
+        raise e
+
+    new_temp_file_path = auxiliary_temp_file_path
+    return PointCloudPreprocessResult(
+        path=new_temp_file_path, bounds=bounds, temp_dir=temp_dir
+    )
+
+
+def preprocess_raster(temp_file_path: str, metadata: dict):
+    bounds = None
+    ds = gdal.Open(temp_file_path)
+    if ds:
+        gt = ds.GetGeoTransform()
+        width = ds.RasterXSize
+        height = ds.RasterYSize
+
+        xmin = gt[0]
+        ymax = gt[3]
+        xmax = gt[0] + width * gt[1] + height * gt[2]
+        ymin = gt[3] + width * gt[4] + height * gt[5]
+
+        bounds = [xmin, ymin, xmax, ymax]
+
+        src_crs = ds.GetProjection()
+        if src_crs:
+            src_srs = osr.SpatialReference()
+            src_srs.ImportFromWkt(src_crs)
+            epsg_code = src_srs.GetAuthorityCode(None)
+            if epsg_code:
+                metadata["original_srid"] = int(epsg_code)
+
+        if src_crs and "EPSG:4326" not in src_crs and "WGS84" not in src_crs:
+            src_srs = osr.SpatialReference()
+            src_srs.ImportFromWkt(src_crs)
+            transformer = Transformer.from_crs(
+                src_srs.ExportToProj4(), "EPSG:4326", always_xy=True
+            )
+            xmin, ymin = transformer.transform(bounds[0], bounds[1])
+            xmax, ymax = transformer.transform(bounds[2], bounds[3])
+
+            bounds = [xmin, ymin, xmax, ymax]
+
+        if ds.RasterCount == 1:
+            try:
+                band = ds.GetRasterBand(1)
+                stats = band.ComputeStatistics(False)  # [min, max, mean, stdev]
+                min_val, max_val = stats[0], stats[1]
+                metadata["raster_value_stats_b1"] = {
+                    "min": min_val,
+                    "max": max_val,
+                }
+            except Exception as e:
+                print(f"Error computing raster statistics: {str(e)}")
+        ds = None
+
+    return bounds
 
 
 def validate_remote_url(url: str, source_type: str) -> str:
@@ -114,6 +276,12 @@ def validate_remote_url(url: str, source_type: str) -> str:
             )
         # Extract the actual URL from CSV:/vsicurl/URL format
         actual_url = url.replace("CSV:/vsicurl/", "")
+    elif url.startswith("WFS:"):
+        # Extract the actual URL from WFS:URL format
+        actual_url = url.replace("WFS:", "")
+    elif url.startswith("ESRIJSON:"):
+        # Extract the actual URL from ESRIJSON:URL format
+        actual_url = url.replace("ESRIJSON:", "")
     else:
         actual_url = url
 
@@ -197,7 +365,7 @@ def validate_remote_url(url: str, source_type: str) -> str:
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
-        raise HTTPException(status_code=400, detail=f"Invalid URL format: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid URL format")
 
     return url
 
@@ -228,9 +396,6 @@ class MapCreateRequest(BaseModel):
     title: str = Field(
         default="Untitled Map", description="Display name for the new map"
     )
-    description: str = Field(
-        default="", description="Optional description of the map's purpose or contents"
-    )
 
 
 class MapResponse(BaseModel):
@@ -239,22 +404,56 @@ class MapResponse(BaseModel):
         description="ID of the project containing this map. Projects can contain multiple related maps."
     )
     title: str = Field(description="Display name of the map")
-    description: str = Field(
-        description="Optional description of the map's purpose or contents"
-    )
     created_on: str = Field(description="ISO timestamp when the map was created")
-    last_edited: str = Field(description="ISO timestamp when the map was last modified")
+    map_link: str = Field(description="URL to view the map project")
 
 
 class UserMapsResponse(BaseModel):
     maps: List[MapResponse]
 
 
+# mundi-public/frontendts/src/lib/types.tsx
+class LayerMetadata(BaseModel):
+    original_filename: Optional[str] = None
+    original_format: Optional[str] = None
+    converted_to: Optional[str] = None
+    original_srid: Optional[int] = None
+    feature_count: Optional[int] = None
+    geometry_type: Optional[str] = None
+    raster_value_stats_b1: Optional[dict] = None  # {min: float, max: float}
+    pointcloud_anchor: Optional[dict] = None  # {lon: float, lat: float}
+    pointcloud_z_range: Optional[List[float]] = None  # [min_z, max_z]
+
+
+def _filter_layer_metadata(md: Optional[dict]) -> Optional[dict]:
+    if not md or not isinstance(md, dict):
+        return None
+
+    allowed_keys = {
+        "original_filename",
+        "original_format",
+        "converted_to",
+        "original_srid",
+        "feature_count",
+        "geometry_type",
+        "raster_value_stats_b1",
+        "pointcloud_anchor",
+        "pointcloud_z_range",
+    }
+
+    out: dict = {}
+    for k in allowed_keys:
+        if k in md:
+            out[k] = md[k]
+
+    return LayerMetadata(**out).model_dump(exclude_none=True)
+
+
 class LayerResponse(BaseModel):
     id: str
     name: str
     type: str
-    metadata: Optional[dict] = None
+    metadata: Optional[LayerMetadata] = None
     bounds: Optional[List[float]] = (
         None  # [xmin, ymin, xmax, ymax] in WGS84 coordinates
     )
@@ -312,23 +511,42 @@ class PresignedUrlResponse(BaseModel):
     format: str
 
 
+class MapUpdateRequest(BaseModel):
+    basemap: Optional[str] = Field(None, description="Basemap style name")
+
+
 @router.post(
     "/create",
     response_model=MapResponse,
     operation_id="create_map",
-    summary="Create a map project",
+    summary="Create a new map",
 )
 async def create_map(
     map_request: MapCreateRequest,
     session: UserContext = Depends(verify_session_required),
 ):
-    """Creates a new map project.
+    """Creates a new map project. Projects contain multiple map versions ("maps"),
+    unattached layer data, and a history of changes to the project. Each edit will
+    create a new map version.
 
-    This endpoint returns both a map id `id` and project id `project_id`. Projects
-    can contain multiple map versions ("maps"), unattached layer data, and details
-    a history of changes to the project. Each edit will create a new map version.
+    Accepts `title` in the request body. Returns overarching project id
+    `project_id` and initial map version id `id`.
 
-    Accepts both `title` and `description` in the request body.
+    ```py
+    result = httpx.post(
+        "https://app.mundi.ai/api/maps/create",
+        json={"title": "Brazilian catchment areas"},
+        headers={"Authorization": f"Bearer {os.environ['MUNDI_API_KEY']}"}
+    ).json()
+
+    assert result == {
+        "title": "Brazilian catchment areas",
+        "created_on": "2025-08-29T12:34:56.789Z",
+        "map_link": "https://app.mundi.ai/project/PGJSkB1zj7fT",
+        "id": "MWfqcRak59bo",
+        "project_id": "PGJSkB1zj7fT"
+    }
+    ```
     """
     owner_id = session.get_user_id()
 
@@ -342,8 +560,8 @@ async def create_map(
         await conn.execute(
             """
             INSERT INTO user_mundiai_projects
-            (id, owner_uuid, link_accessible, maps, title)
-            VALUES ($1, $2, FALSE, ARRAY[$3], $4)
+            (id, owner_uuid, maps, title)
+            VALUES ($1, $2, ARRAY[$3], $4)
             """,
             project_id,
             owner_id,
@@ -355,15 +573,14 @@ async def create_map(
         result = await conn.fetchrow(
             """
             INSERT INTO user_mundiai_maps
-            (id, project_id, owner_uuid, title, description, display_as_diff)
-            VALUES ($1, $2, $3, $4, $5, TRUE)
-            RETURNING id, title, description, created_on, last_edited
+            (id, project_id, owner_uuid, title)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, title, created_on
             """,
             map_id,
             project_id,
             owner_id,
             map_request.title,
-            map_request.description,
         )
 
         # Validate the result
@@ -374,13 +591,13 @@ async def create_map(
             )
 
         # Return the created map data
+        website_domain = os.environ.get("WEBSITE_DOMAIN", "https://app.mundi.ai")
         return MapResponse(
             id=map_id,
             project_id=project_id,
             title=result["title"],
-            description=result["description"],
             created_on=result["created_on"].isoformat(),
-            last_edited=result["last_edited"].isoformat(),
+            map_link=f"{website_domain}/project/{project_id}",
         )
 
 
@@ -390,7 +607,6 @@ async def create_map(
 )
 async def get_map_route(
     request: Request,
-    diff_map_id: Optional[str] = None,
     map: MundiMap = Depends(get_map),
     session: UserContext = Depends(verify_session_optional),
 ):
@@ -416,19 +632,6 @@ async def get_map_route(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Project not found",
             )
-        # Handle diff_map_id logic
-        prev_map_id = None
-        if diff_map_id == "auto":
-            # Find the previous map in the project
-            proj_maps = project["maps"] or []
-            try:
-                current_index = proj_maps.index(map.id)
-                if current_index > 0:
-                    prev_map_id = proj_maps[current_index - 1]
-            except ValueError:
-                pass  # map_id not found in project maps
-        elif diff_map_id:
-            prev_map_id = diff_map_id
 
         # Get last_edited times for maps in the project
         map_ids = project["maps"] or []
@@ -485,116 +688,7 @@ async def get_map_route(
         for layer in layers:
             if layer.get("metadata") and isinstance(layer["metadata"], str):
                 layer["metadata"] = json.loads(layer["metadata"])
-
-        # Calculate diff if prev_map_id is provided
-        layer_diffs = None
-        if prev_map_id:
-            user_id = session.get_user_id() if session else str(map.owner_uuid)
-
-            # Get previous map layers with their style IDs
-            prev_layer_rows = await conn.fetch(
-                """
-                SELECT ml.layer_id, ml.name, ml.type, ml.metadata, ml.geometry_type, ml.feature_count,
-                       mls.style_id
-                FROM user_mundiai_maps m
-                JOIN map_layers ml ON ml.layer_id = ANY(m.layers)
-                LEFT JOIN map_layer_styles mls ON mls.map_id = m.id AND mls.layer_id = ml.layer_id
-                WHERE m.id = $1 AND m.owner_uuid = $2 AND m.soft_deleted_at IS NULL
-                """,
-                prev_map_id,
-                user_id,
-            )
-            prev_layers = {row["layer_id"]: row for row in prev_layer_rows}
-
-            # Get current map layers with their style IDs
-            current_layer_rows = await conn.fetch(
-                """
-                SELECT ml.layer_id, ml.name, ml.type, ml.metadata, ml.geometry_type, ml.feature_count,
-                       mls.style_id
-                FROM user_mundiai_maps m
-                JOIN map_layers ml ON ml.layer_id = ANY(m.layers)
-                LEFT JOIN map_layer_styles mls ON mls.map_id = m.id AND mls.layer_id = ml.layer_id
-                WHERE m.id = $1 AND m.owner_uuid = $2 AND m.soft_deleted_at IS NULL
-                """,
-                map.id,
-                user_id,
-            )
-            new_layers = {row["layer_id"]: row for row in current_layer_rows}
-
-            # Calculate diffs
-            layer_diffs = []
-            all_layer_ids = set(new_layers.keys()) | set(prev_layers.keys())
-
-            for layer_id in all_layer_ids:
-                new_layer = new_layers.get(layer_id)
-                prev_layer = prev_layers.get(layer_id)
-
-                if new_layer and not prev_layer:
-                    # Added layer
-                    layer_diffs.append(
-                        {
-                            "layer_id": layer_id,
-                            "name": new_layer["name"],
-                            "status": "added",
-                        }
-                    )
-                elif prev_layer and not new_layer:
-                    # Removed layer
-                    layer_diffs.append(
-                        {
-                            "layer_id": layer_id,
-                            "name": prev_layer["name"],
-                            "status": "removed",
-                        }
-                    )
-                elif new_layer and prev_layer:
-                    # Check for changes
-                    changes = {}
-                    if new_layer["name"] != prev_layer["name"]:
-                        changes["name"] = {
-                            "old": prev_layer["name"],
-                            "new": new_layer["name"],
-                        }
-                    if new_layer["metadata"] != prev_layer["metadata"]:
-                        changes["metadata"] = {
-                            "old": prev_layer["metadata"],
-                            "new": new_layer["metadata"],
-                        }
-                    if new_layer["style_id"] != prev_layer["style_id"]:
-                        changes["style_id"] = {
-                            "old": prev_layer["style_id"],
-                            "new": new_layer["style_id"],
-                        }
-
-                    if changes:
-                        layer_diffs.append(
-                            {
-                                "layer_id": layer_id,
-                                "name": new_layer["name"],
-                                "status": "edited",
-                                "changes": changes,
-                            }
-                        )
-                    else:
-                        layer_diffs.append(
-                            {
-                                "layer_id": layer_id,
-                                "name": new_layer["name"],
-                                "status": "existing",
-                            }
-                        )
-        elif diff_map_id == "auto" and proj_maps and map.id == proj_maps[0]:
-            # If this is the first map in the project and auto diff is requested,
-            # mark all layers as added
-            layer_diffs = []
-            for layer in layers:
-                layer_diffs.append(
-                    {
-                        "layer_id": layer["id"],
-                        "name": layer["name"],
-                        "status": "added",
-                    }
-                )
+            layer["metadata"] = _filter_layer_metadata(layer.get("metadata"))
 
         # Return JSON payload
         response = {
@@ -602,15 +696,7 @@ async def get_map_route(
             "project_id": map.project_id,
             "layers": layers,
             "changelog": changelog,
-            "display_as_diff": map.display_as_diff,
         }
-
-        if layer_diffs is not None:
-            response["diff"] = {
-                "prev_map_id": prev_map_id,
-                "new_map_id": map.id,
-                "layer_diffs": layer_diffs,
-            }
 
         return response
 
@@ -627,7 +713,7 @@ async def get_map_layers(
         # Get all layers by their IDs using ANY() instead of f-string
         layers = await conn.fetch(
             """
-            SELECT layer_id as id, name, type, raster_cog_url, metadata, bounds, geometry_type, feature_count
+            SELECT layer_id as id, name, type, metadata, bounds, geometry_type, feature_count
             FROM map_layers
             WHERE layer_id = ANY($1)
             ORDER BY id
@@ -643,6 +729,7 @@ async def get_map_layers(
                 # Convert metadata from JSON string to Python dict if needed
                 if isinstance(layer["metadata"], str):
                     layer["metadata"] = json.loads(layer["metadata"])
+            layer["metadata"] = _filter_layer_metadata(layer.get("metadata"))
 
             # Set feature_count from metadata if it exists
             if (
@@ -807,43 +894,14 @@ async def get_map_description(
 )
 async def get_map_style(
     request: Request,
-    map_id: str,
+    map: MundiMap = Depends(get_map),
     only_show_inline_sources: bool = False,
-    session: UserContext = Depends(verify_session_optional),
     override_layers: Optional[str] = None,
     basemap: Optional[str] = None,
     base_map: BaseMapProvider = Depends(get_base_map_provider),
 ):
-    # Get vector layers for this map from the database
-    async with async_conn("get_map_style.fetch_map") as conn:
-        # First check if the map exists and is accessible
-        map_result = await conn.fetchrow(
-            """
-            SELECT m.id, p.link_accessible, m.owner_uuid, m.layers
-            FROM user_mundiai_maps m
-            JOIN user_mundiai_projects p ON m.project_id = p.id
-            WHERE m.id = $1 AND m.soft_deleted_at IS NULL
-            """,
-            map_id,
-        )
-
-    if not map_result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Map not found"
-        )
-
-    # Check if map is publicly accessible
-    if not map_result["link_accessible"]:
-        # If not publicly accessible, verify that we have auth
-        if session is None or session.get_user_id() != str(map_result["owner_uuid"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
     return await get_map_style_internal(
-        map_id, base_map, only_show_inline_sources, override_layers, basemap
+        str(map.id), base_map, only_show_inline_sources, override_layers, basemap
     )
 
 
@@ -856,7 +914,61 @@ async def get_available_basemaps(
     base_map: BaseMapProvider = Depends(get_base_map_provider),
 ):
     """Get list of available basemap styles."""
-    return {"styles": base_map.get_available_styles()}
+    return {
+        "styles": base_map.get_available_styles(),
+        "display_names": base_map.get_style_display_names(),
+    }
+
+
+@basemap_router.get("/render.png", operation_id="render_basemap")
+async def render_basemap(
+    basemap: str = Query(...),
+    base_map: BaseMapProvider = Depends(get_base_map_provider),
+):
+    available_basemaps = base_map.get_available_styles()
+    if basemap not in available_basemaps:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid basemap '{basemap}'. Available options: {available_basemaps}",
+        )
+
+    s3_key = f"basemap-previews/{basemap}.png"
+    s3 = await get_async_s3_client()
+    bucket = get_bucket_name()
+
+    try:
+        head_response = await s3.head_object(Bucket=bucket, Key=s3_key)
+        last_modified = head_response["LastModified"]
+
+        # Check if cache is less than 24 hours old
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age = now - last_modified
+
+        if age.total_seconds() < 86400:  # 24 hours = 86400 seconds
+            response = await s3.get_object(Bucket=bucket, Key=s3_key)
+            cached_image = await response["Body"].read()
+            return Response(content=cached_image, media_type="image/png")
+    except Exception:
+        pass
+
+    style_json = await base_map.get_base_style(basemap)
+
+    response, _ = await render_map_internal(
+        map_id=f"basemap_{basemap}",
+        bbox="-10,29.75,30,70",
+        width=256,
+        height=256,
+        renderer="mbgl",
+        bgcolor="white",
+        style_json=json.dumps(style_json),
+    )
+
+    try:
+        await s3.put_object(Bucket=bucket, Key=s3_key, Body=response.body)
+    except Exception:
+        pass
+
+    return response
 
 
 async def get_map_style_internal(
@@ -868,10 +980,10 @@ async def get_map_style_internal(
 ):
     # Get vector layers for this map from the database
     async with async_conn("get_map_style_internal.fetch_layers") as conn:
-        # Get layers from the map
+        # Get layers and basemap from the map
         map_result = await conn.fetchrow(
             """
-            SELECT layers
+            SELECT layers, basemap
             FROM user_mundiai_maps
             WHERE id = $1 AND soft_deleted_at IS NULL
             """,
@@ -889,7 +1001,7 @@ async def get_map_style_internal(
             # Fetch metadata as well to check for cog_url_suffix
             all_layers = await conn.fetch(
                 """
-                SELECT ml.layer_id, ml.name, ml.type, ls.style_json as maplibre_layers, ml.feature_count, ml.bounds, ml.metadata, ml.geometry_type
+                SELECT ml.layer_id, ml.name, ml.type, ls.style_json as maplibre_layers, ml.feature_count, ml.bounds, ml.metadata, ml.geometry_type, ml.remote_url
                 FROM map_layers ml
                 LEFT JOIN map_layer_styles mls ON ml.layer_id = mls.layer_id AND mls.map_id = $1
                 LEFT JOIN layer_styles ls ON mls.style_id = ls.style_id
@@ -919,7 +1031,14 @@ async def get_map_style_internal(
         vector_layers.sort(key=get_geometry_order)
         postgis_layers.sort(key=get_geometry_order)
 
-    style_json = await base_map.get_base_style(basemap)
+    # Use basemap parameter, or fall back to stored basemap from database
+    effective_basemap = basemap or map_result["basemap"]
+    style_json = await base_map.get_base_style(effective_basemap)
+
+    # Add current basemap to style metadata for frontend
+    if "metadata" not in style_json:
+        style_json["metadata"] = {}
+    style_json["metadata"]["current_basemap"] = effective_basemap
 
     # compute combined WGS84 bounds from all_layers and derive center + zoom with 20% padding
     bounds_list = [layer["bounds"] for layer in all_layers if layer.get("bounds")]
@@ -989,7 +1108,8 @@ async def get_map_style_internal(
         layer_id = layer["layer_id"]
 
         # Use GeoJSON or PMTiles based on the only_show_inline_sources parameter
-        if only_show_inline_sources:
+        # this is NOT possible for remote cloud native layers
+        if only_show_inline_sources and not layer["remote_url"]:
             # For rendering, also get a presigned URL for PMTiles if available
             metadata = json.loads(layer.get("metadata", "{}"))
             pmtiles_key = metadata.get("pmtiles_key")
@@ -1138,6 +1258,23 @@ async def upload_layer(
 
     Returns the new layer details including its unique layer ID. The layer can optionally not be added to the map,
     but will be faster to add to an existing map later.
+
+    ```py
+    with open("brazil_watersheds.gpkg", "rb") as f:
+        # project ID is PGJSkB1zj7fT, previous map ID is M4NzE8rk4FZS
+        result = httpx.post(
+            f"https://app.mundi.ai/api/maps/M4NzE8rk4FZS/layers",
+            files={"file": ("brazil_watersheds.gpkg", f, "application/octet-stream")},
+            data={"layer_name": "Amazon Basin Watersheds", "add_layer_to_map": True},
+            headers={"Authorization": f"Bearer {os.environ['MUNDI_API_KEY']}"}
+        ).json()
+
+    assert result["name"] == "Amazon Basin Watersheds"
+    assert result["dag_child_map_id"] == "M4NzE8rk4FZS"
+    # use result["dag_child_map_id"] as the new map id, and view this new uploaded layer
+    # by navigating to https://app.mundi.ai/project/PGJSkB1zj7fT/M4NzE8rk4FZS
+    subprocess.run(["open", "https://app.mundi.ai/project/PGJSkB1zj7fT/M4NzE8rk4FZS"])
+    ```
     """
     layer_result = await internal_upload_layer(
         map_id=forked_map.id,
@@ -1147,6 +1284,7 @@ async def upload_layer(
         user_id=session.get_user_id(),
         project_id=forked_map.project_id,
     )
+    assert layer_result is not None
 
     return LayerUploadResponse(
         dag_child_map_id=forked_map.id,
@@ -1166,7 +1304,7 @@ async def internal_upload_layer(
     add_layer_to_map: bool,
     user_id: str,
     project_id: str,
-):
+) -> InternalLayerUploadResponse:
     """Internal function to upload a layer without auth checks."""
 
     # Connect to database
@@ -1301,72 +1439,27 @@ async def internal_upload_layer(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Failed to convert CSV to spatial format, make sure CSV has a column named lat/lon/long/lng, latitude/longitude, or x/y.",
                     )
-            # convert kml/kmz to flatgeobufs
+            # handle KMZ (zip) by extracting its contained KML and using it directly (no FGB conversion)
             elif file_ext in [".kml", ".kmz"]:
-                auxiliary_temp_file_path = temp_file_path + ".fgb"
                 temp_dir = None
-
-                # If this is a KMZ file, extract the KML first
                 if file_ext == ".kmz":
                     try:
                         kml_file_path, temp_dir = process_kmz_to_kml(temp_file_path)
                         temp_file_path = kml_file_path
-                    except ValueError as e:
+                        file_ext = ".kml"
+                    except ValueError:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"KMZ file does not contain any KML files: {str(e)}",
+                            detail="KMZ file does not contain any KML files",
                         )
-                    except Exception as e:
+                    except Exception:
                         if temp_dir:
-                            import shutil
-
                             shutil.rmtree(temp_dir, ignore_errors=True)
                         raise HTTPException(
                             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Error processing KMZ file: {str(e)}",
+                            detail="Error processing KMZ file",
                         )
-
-                ogr_cmd = [
-                    "ogr2ogr",
-                    "-f",
-                    "FlatGeobuf",
-                    auxiliary_temp_file_path,
-                    temp_file_path,
-                    "-lco",
-                    "SPATIAL_INDEX=YES",
-                ]
-                try:
-                    process = await asyncio.create_subprocess_exec(
-                        *ogr_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout, stderr = await process.communicate()
-
-                    if process.returncode != 0:
-                        raise subprocess.CalledProcessError(
-                            process.returncode, ogr_cmd, stderr=stderr.decode()
-                        )
-
-                    file_ext = ".fgb"
-                    s3_key = f"uploads/{user_id}/{project_id}/{layer_id}{file_ext}"
-                    temp_file_path = auxiliary_temp_file_path
-
-                    metadata_dict["original_format"] = (
-                        "kml" if file_ext == ".kml" else "kmz"
-                    )
-
-                except subprocess.CalledProcessError:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Failed to convert KML/KMZ to spatial format. Please check that the file is valid.",
-                    )
-                finally:
-                    # Clean up temp directory if it exists
-                    if temp_dir:
-                        import shutil
-
-                        shutil.rmtree(temp_dir, ignore_errors=True)
+                # no conversion; process the KML file in-place as a vector source
 
             # If this is a ZIP file, process it for shapefiles and convert to GeoPackage
             temp_dir = None
@@ -1406,319 +1499,192 @@ async def internal_upload_layer(
                     print(f"Error processing ZIP file: {str(e)}")
                     # Clean up temp directory if it exists
                     if temp_dir:
-                        import shutil
-
                         shutil.rmtree(temp_dir, ignore_errors=True)
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Error processing ZIP file: {str(e)}",
                     )
             elif layer_type == "point_cloud":
-                # handle it here because we're only going to upload .laz files
-                import laspy
-                import pyproj
-
-                with tracer.start_as_current_span("internal_upload_layer.laspy"):
-                    las = laspy.read(temp_file_path)
-
-                    # centre of the header bounding box
-                    mid_x = (las.header.mins[0] + las.header.maxs[0]) / 2
-                    mid_y = (las.header.mins[1] + las.header.maxs[1]) / 2
-
-                    src_crs = las.header.parse_crs()
-                    if src_crs is None:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Point cloud file (.las, .laz) does not have a CRS, which is required to display on the map",
-                        )
-
-                    # Create transformer for CRS conversion
-                    transformer = pyproj.Transformer.from_crs(
-                        src_crs, 4326, always_xy=True
-                    )
-
-                    # lon/lat in WGS-84 for anchor point
-                    lon, lat = transformer.transform(mid_x, mid_y)
-
-                    # Calculate bounds in WGS84
-                    min_x, min_y, min_z = las.header.mins
-                    max_x, max_y, max_z = las.header.maxs
-
-                # Transform bounds to WGS84
-                min_lon, min_lat = transformer.transform(min_x, min_y)
-                max_lon, max_lat = transformer.transform(max_x, max_y)
-
-                bounds = [min_lon, min_lat, max_lon, max_lat]
-
-                metadata_dict["pointcloud_anchor"] = {"lon": lon, "lat": lat}
-                metadata_dict["pointcloud_z_range"] = [min_z, max_z]
-
-                # generate a new .laz file
-                temp_dir = tempfile.mkdtemp()
-                auxiliary_temp_file_path = os.path.join(temp_dir, "4326.laz")
-                las2las_cmd = [
-                    "las2las64",
-                    "-i",
-                    temp_file_path,
-                    "-set_version",
-                    "1.3",
-                    "-proj_epsg",
-                    "4326",
-                    "-o",
-                    auxiliary_temp_file_path,
-                ]
-
-                try:
-                    with tracer.start_as_current_span("internal_upload_layer.las2las"):
-                        process = await asyncio.create_subprocess_exec(*las2las_cmd)
-                        await process.wait()
-
-                    # Check if output file was created and is valid using lasinfo64
-                    if not os.path.exists(auxiliary_temp_file_path):
-                        raise Exception("las2las did not create output file")
-
-                    # Validate the output file using lasinfo64
-                    lasinfo_cmd = ["lasinfo64", auxiliary_temp_file_path]
-                    lasinfo_process = await asyncio.create_subprocess_exec(
-                        *lasinfo_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await lasinfo_process.wait()
-
-                    if lasinfo_process.returncode != 0:
-                        raise Exception(
-                            f"Output file validation failed - lasinfo64 returned exit code {lasinfo_process.returncode}"
-                        )
-
-                except Exception as e:
-                    print(f"Error converting point cloud to EPSG:4326: {str(e)}")
-                    raise e
-                # upload the new .laz file instead
-                temp_file_path = auxiliary_temp_file_path
+                pc = await preprocess_point_cloud(temp_file_path, metadata_dict)
+                temp_file_path = pc.path
+                bounds = pc.bounds
+                # ensure later cleanup matches previous behavior
+                temp_dir = pc.temp_dir
 
             # Upload file to S3/MinIO
             await s3_client.upload_file(
                 temp_file_path, bucket_name, s3_key, Config=one_shot_config
             )
 
-            # Get layer bounds using GDAL
-            geometry_type = "unknown"
-            feature_count = None
-            if layer_type == "raster":
-                # Use GDAL to get bounds for raster files
-                ds = gdal.Open(temp_file_path)
-                if ds:
-                    gt = ds.GetGeoTransform()
-                    width = ds.RasterXSize
-                    height = ds.RasterYSize
+            # Unify: always handle as a list of layers and return the first
+            created_layer_ids: list[str] = []
+            first_layer_url: str | None = None
+            first_layer_name: str | None = None
 
-                    # Calculate corner coordinates
-                    xmin = gt[0]
-                    ymax = gt[3]
-                    xmax = gt[0] + width * gt[1] + height * gt[2]
-                    ymin = gt[3] + width * gt[4] + height * gt[5]
+            if layer_type == "vector":
+                try:
+                    sublayers = fiona.listlayers(temp_file_path)
+                except Exception:
+                    sublayers = []
+                multi = len(sublayers) > 1
+                if not sublayers:
+                    sublayers = [None]
 
-                    bounds = [xmin, ymin, xmax, ymax]
+                for idx, sub in enumerate(sublayers):
+                    this_layer_id = layer_id if idx == 0 else generate_id(prefix="L")
+                    if layer_name:
+                        display_name = (
+                            f"{layer_name} - {sub}" if (multi and sub) else layer_name
+                        )
+                    else:
+                        display_name = str(sub) if (multi and sub) else file_basename
 
-                    # Check if CRS is not EPSG:4326
-                    src_crs = ds.GetProjection()
-                    if src_crs:
-                        # Store EPSG code if available
-                        src_srs = osr.SpatialReference()
-                        src_srs.ImportFromWkt(src_crs)
-                        epsg_code = src_srs.GetAuthorityCode(None)
-                        if epsg_code:
-                            metadata_dict["original_srid"] = int(epsg_code)
+                    lr = await process_vector_layer_common(
+                        this_layer_id,
+                        temp_file_path,
+                        display_name,
+                        user_id,
+                        project_id,
+                        dataset_layer=sub if isinstance(sub, str) else None,
+                    )
 
-                    if (
-                        src_crs
-                        and "EPSG:4326" not in src_crs
-                        and "WGS84" not in src_crs
-                    ):
-                        # Create transformer from source CRS to WGS84
-                        src_srs = osr.SpatialReference()
-                        src_srs.ImportFromWkt(src_crs)
-                        transformer = Transformer.from_crs(
-                            src_srs.ExportToProj4(), "EPSG:4326", always_xy=True
+                    per_md = {
+                        **metadata_dict,
+                        **lr.metadata.model_dump(exclude_none=True),
+                    }
+
+                    await conn.execute(
+                        """
+                        INSERT INTO map_layers
+                        (layer_id, owner_uuid, name, type, metadata, bounds, geometry_type, feature_count, s3_key, size_bytes, source_map_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        """,
+                        this_layer_id,
+                        user_id,
+                        display_name,
+                        layer_type,
+                        json.dumps(per_md),
+                        lr.bounds,
+                        lr.geometry_type,
+                        lr.feature_count,
+                        s3_key,
+                        file_size_bytes,
+                        map_id,
+                    )
+
+                    if lr.geometry_type and lr.geometry_type != "unknown":
+                        ml_layers = generate_maplibre_layers_for_layer_id(
+                            this_layer_id, lr.geometry_type
+                        )
+                        style_id = generate_id(prefix="S")
+                        await conn.execute(
+                            """
+                            INSERT INTO layer_styles
+                            (style_id, layer_id, style_json, created_by)
+                            VALUES ($1, $2, $3, $4)
+                            """,
+                            style_id,
+                            this_layer_id,
+                            json.dumps(ml_layers),
+                            user_id,
+                        )
+                        await conn.execute(
+                            """
+                            INSERT INTO map_layer_styles (map_id, layer_id, style_id)
+                            VALUES ($1, $2, $3)
+                            """,
+                            map_id,
+                            this_layer_id,
+                            style_id,
                         )
 
-                        # Transform the bounds
-                        xmin, ymin = transformer.transform(bounds[0], bounds[1])
-                        xmax, ymax = transformer.transform(bounds[2], bounds[3])
-
-                        bounds = [xmin, ymin, xmax, ymax]
-
-                    # Get statistics for single-band rasters
-                    if ds.RasterCount == 1:
-                        try:
-                            band = ds.GetRasterBand(1)
-                            # ComputeStatistics(approx_ok, force)
-                            stats = band.ComputeStatistics(
-                                False
-                            )  # [min, max, mean, stdev]
-                            min_val, max_val = stats[0], stats[1]
-                            metadata_dict["raster_value_stats_b1"] = {
-                                "min": min_val,
-                                "max": max_val,
-                            }
-                        except Exception as e:
-                            print(f"Error computing raster statistics: {str(e)}")
-
-                    # Close dataset
-                    ds = None
-            elif layer_type == "point_cloud":
-                # handled above
-                pass
+                    created_layer_ids.append(this_layer_id)
+                    if first_layer_url is None:
+                        first_layer_url = f"/api/layer/{this_layer_id}.pmtiles"
+                        first_layer_name = display_name
             else:
-                # Use shared utility for vector bounds and metadata extraction
-                layer_info = await get_layer_bounds_and_metadata(
-                    temp_file_path, layer_type
+                # raster/point cloud as single item
+                if layer_type == "raster":
+                    bounds = preprocess_raster(temp_file_path, metadata_dict)
+                await conn.execute(
+                    """
+                    INSERT INTO map_layers
+                    (layer_id, owner_uuid, name, type, metadata, bounds, geometry_type, feature_count, s3_key, size_bytes, source_map_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    """,
+                    layer_id,
+                    user_id,
+                    layer_name,
+                    layer_type,
+                    json.dumps(metadata_dict),
+                    bounds,
+                    None,
+                    None,
+                    s3_key,
+                    file_size_bytes,
+                    map_id,
                 )
-                bounds = layer_info["bounds"]
-                geometry_type = layer_info["geometry_type"]
-                feature_count = layer_info["feature_count"]
-                metadata_dict.update(layer_info["metadata_updates"])
-
-            # Generate MapLibre layers for vector layers
-            maplibre_layers = None
-            if layer_type == "vector" and geometry_type:
-                maplibre_layers = generate_maplibre_layers_for_layer_id(
-                    layer_id, geometry_type
+                created_layer_ids.append(layer_id)
+                first_layer_name = layer_name
+                first_layer_url = (
+                    f"/api/layer/{layer_id}.laz"
+                    if layer_type == "point_cloud"
+                    else f"/api/layer/{layer_id}.cog.tif"
                 )
 
-            new_layer_result = await conn.fetchrow(
+        # Update map layers if requested
+        if add_layer_to_map and created_layer_ids:
+            map_data = await conn.fetchrow(
                 """
-                INSERT INTO map_layers
-                (layer_id, owner_uuid, name, type, metadata, bounds, geometry_type, feature_count, s3_key, size_bytes, source_map_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                RETURNING layer_id
+                SELECT layers FROM user_mundiai_maps
+                WHERE id = $1
                 """,
-                layer_id,
-                user_id,
-                layer_name,
-                layer_type,
-                json.dumps(metadata_dict),
-                bounds,
-                geometry_type if layer_type == "vector" else None,
-                feature_count,
-                s3_key,
-                file_size_bytes,
+                map_id,
+            )
+            current_layers = (
+                map_data["layers"] if map_data and map_data["layers"] else []
+            )
+            await conn.execute(
+                """
+                UPDATE user_mundiai_maps
+                SET layers = $1,
+                    last_edited = CURRENT_TIMESTAMP
+                WHERE id = $2
+                """,
+                current_layers + created_layer_ids,
                 map_id,
             )
 
-            new_layer_id = new_layer_result["layer_id"]
+        # Cleanup temp_dir if it exists
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
-            # If adding layer to map, update the map with the new layer
-            if add_layer_to_map:
-                # First get the current layers array
-                map_data = await conn.fetchrow(
-                    """
-                    SELECT layers FROM user_mundiai_maps
-                    WHERE id = $1
-                    """,
-                    map_id,
-                )
-                current_layers = (
-                    map_data["layers"] if map_data and map_data["layers"] else []
-                )
-
-                # Then update with the new layer appended
-                await conn.execute(
-                    """
-                    UPDATE user_mundiai_maps
-                    SET layers = $1,
-                        last_edited = CURRENT_TIMESTAMP
-                    WHERE id = $2
-                    """,
-                    current_layers + [new_layer_id],
-                    map_id,
-                )
-
-            # Create direct URL for the layer based on type
-            layer_url = (
-                f"/api/layer/{new_layer_id}.pmtiles"
+        # Return the first created layer for compatibility
+        assert created_layer_ids, "No layers were created"
+        return InternalLayerUploadResponse(
+            id=created_layer_ids[0],
+            name=first_layer_name or (layer_name or file_basename),
+            type=layer_type,
+            url=first_layer_url
+            or (
+                f"/api/layer/{created_layer_ids[0]}.pmtiles"
                 if layer_type == "vector"
-                else f"/api/layer/{new_layer_id}.cog.tif"
-            )
-
-            # If this is a vector layer, create a style for it
-            if layer_type == "vector" and geometry_type:
-                maplibre_layers = generate_maplibre_layers_for_layer_id(
-                    new_layer_id, geometry_type
+                else (
+                    f"/api/layer/{created_layer_ids[0]}.laz"
+                    if layer_type == "point_cloud"
+                    else f"/api/layer/{created_layer_ids[0]}.cog.tif"
                 )
+            ),
+        )
 
-                # Create a default style entry
-                style_id = generate_id(prefix="S")
-                await conn.execute(
-                    """
-                    INSERT INTO layer_styles
-                    (style_id, layer_id, style_json, created_by)
-                    VALUES ($1, $2, $3, $4)
-                    """,
-                    style_id,
-                    new_layer_id,
-                    json.dumps(maplibre_layers),
-                    user_id,
-                )
 
-                # Link the style to the map
-                await conn.execute(
-                    """
-                    INSERT INTO map_layer_styles (map_id, layer_id, style_id)
-                    VALUES ($1, $2, $3)
-                    """,
-                    map_id,
-                    new_layer_id,
-                    style_id,
-                )
+CLOUD_NATIVE_EXTS = {".pmtiles", ".tif"}
+RASTER_EXTS = {".tif", ".jpg", ".jpeg", ".png", ".dem"}
+VECTOR_EXTS = {".pmtiles", ".geojson", ".fgb", ".gpkg", ".shp", ".csv"}
 
-                # Generate PMTiles for vector layers
-                if feature_count is not None and feature_count > 0:
-                    # Generate PMTiles asynchronously using shared function
-                    pmtiles_key = await generate_pmtiles_from_ogr_source(
-                        new_layer_id,
-                        temp_file_path,
-                        feature_count,
-                        user_id,
-                        project_id,
-                    )
-
-                    # Update metadata with PMTiles key
-                    result = await conn.fetchrow(
-                        """
-                        SELECT metadata FROM map_layers
-                        WHERE layer_id = $1
-                        """,
-                        new_layer_id,
-                    )
-                    metadata = result["metadata"] if result["metadata"] else {}
-                    # Parse metadata JSON if it's a string
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
-                    metadata["pmtiles_key"] = pmtiles_key
-
-                    # Update the database
-                    await conn.execute(
-                        """
-                        UPDATE map_layers
-                        SET metadata = $1
-                        WHERE layer_id = $2
-                        """,
-                        json.dumps(metadata),
-                        new_layer_id,
-                    )
-
-            # Cleanup temp_dir if it exists
-            if temp_dir:
-                import shutil
-
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-            # Return success response
-            return InternalLayerUploadResponse(
-                id=new_layer_id, name=layer_name, type=layer_type, url=layer_url
-            )
+ESRI_PREFIX = "ESRIJSON:"
+WFS_PREFIX = "WFS:"
+CSV_PREFIX = "CSV:"  # expected "CSV:/vsicurl/<URL>"
 
 
 @router.post(
@@ -1749,374 +1715,253 @@ async def add_remote_layer(
 
     validate_remote_url(request.url, request.source_type)
 
-    # Assert URL format matches the declared source type
-    if request.source_type == "sheets":
-        assert request.url.startswith("CSV:"), (
-            f"Google Sheets source must use CSV: prefix, got: {request.url}"
-        )
-    elif request.source_type == "vector":
-        # Vector sources can be direct URLs or WFS services
-        if request.url.startswith("WFS:"):
-            # WFS URLs are valid vector sources
-            pass
-        elif request.url.startswith("http"):
-            # Direct HTTP URLs for vector files
-            pass
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid vector source URL format: {request.url}",
-            )
-    elif request.source_type == "raster":
-        # Raster sources should be direct URLs
-        if not request.url.startswith("http"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Raster sources must be HTTP URLs, got: {request.url}",
-            )
-    else:
+    url = request.url
+    declared = request.source_type
+    if declared not in {"sheets", "vector", "raster"}:
         raise HTTPException(
-            status_code=400, detail=f"Unsupported source type: {request.source_type}"
+            status_code=400, detail=f"Unsupported source type: {declared}"
+        )
+    if declared == "sheets" and not url.startswith(CSV_PREFIX):
+        raise HTTPException(
+            status_code=400, detail=f"Google Sheets must use CSV: prefix, got: {url}"
         )
 
-    # Determine file type from URL
-    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    ext = Path(parsed.path).suffix.lower()
 
-    # Check if this is a CSV source (Google Sheets)
-    if request.url.startswith("CSV:"):
-        layer_type = "vector"  # CSV is treated as vector data
+    if url.startswith(CSV_PREFIX):
+        kind = "csv"
+        ext = ".csv"
+    elif url.startswith(WFS_PREFIX):
+        kind = "wfs"
+        ext = ".gml"
+    elif url.startswith(ESRI_PREFIX):
+        kind = "esri"
+        ext = ".geojson"
     else:
-        # Regular URL - determine type from extension
-        from pathlib import Path
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400,
+                detail="Remote sources must be HTTP(S) URLs or supported service prefixes.",
+            )
+        kind = "cloud" if ext in CLOUD_NATIVE_EXTS else "http"
 
-        parsed_url = urlparse(request.url)
-        file_ext = Path(parsed_url.path).suffix.lower()
-
-        # Determine layer type based on file extension
+    # infer layer type
+    if declared == "raster":
+        layer_type = "raster"
+    elif declared in {"vector", "sheets"}:
         layer_type = "vector"
-        if file_ext in [".tif", ".tiff", ".jpg", ".jpeg", ".png", ".dem"]:
-            layer_type = "raster"
-        elif file_ext in [".geojson", ".fgb", ".gpkg", ".shp"]:
-            layer_type = "vector"
-        else:
-            # Default to vector, let validation determine if it fails
-            layer_type = "vector"
-
-        # Special handling for WFS (Web Feature Service) URLs
-        # WFS URLs contain service protocol parameters and should not use /vsicurl/ prefix
-        # Validation will be handled during processing for both WFS and regular URLs
-
-    # Handle file processing - CSV sources don't need downloading
-    import tempfile
-
-    if request.url.startswith("CSV:"):
-        # For CSV sources, we don't download - we process directly with OGR
-        # Estimate file size by getting content length
-        import aiohttp
-
-        try:
-            # Extract the actual URL from CSV:/vsicurl/URL format
-            actual_url = request.url.replace("CSV:/vsicurl/", "")
-            async with aiohttp.ClientSession() as http_session:
-                async with http_session.head(actual_url) as response:
-                    file_size_bytes = int(response.headers.get("content-length", 0))
-                    if file_size_bytes == 0:
-                        file_size_bytes = 1000  # Default estimate for CSV
-        except Exception:
-            file_size_bytes = 1000  # Default estimate if head request fails
-
-        # We'll process this directly with OGR later without downloading
-        file_content = None
-    elif (
-        "SERVICE=WFS" in request.url.upper()
-        and "REQUEST=GETFEATURE" in request.url.upper()
-    ):
-        # WFS services should NOT be downloaded - they're processed directly with OGR
-        # Estimate file size for WFS (we can't really know without processing)
-        file_size_bytes = 10000  # Default estimate for WFS response
-        file_content = None
     else:
-        # Download remote file temporarily for processing while maintaining remote status
-        import aiohttp
+        layer_type = "raster" if ext in RASTER_EXTS else "vector"
 
+    is_cloud_native = kind == "cloud"
+    if declared == "raster" and not url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400, detail=f"Raster sources must be HTTP URLs, got: {url}"
+        )
+
+    temp_paths_to_cleanup: list[str] = []
+
+    if kind == "csv":
+        # "CSV:/vsicurl/<URL>"
+        ogr_source = url
+    elif kind in {"wfs", "esri"}:
+        ogr_source = url
+    elif is_cloud_native:
+        ogr_source = f"/vsicurl/{url}"
+    else:
+        # regular HTTP file: download and use internal upload
         async with aiohttp.ClientSession() as http_session:
-            async with http_session.get(request.url) as response:
-                if response.status != 200:
+            async with http_session.get(url) as resp:
+                if resp.status != 200:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Unable to download remote file: HTTP {response.status}",
+                        detail=f"Unable to download remote file: HTTP {resp.status}",
                     )
+                content = await resp.read()
 
-                file_content = await response.read()
-                file_size_bytes = len(file_content)
+        filename = Path(parsed.path).name or f"remote_file{ext}"
+        file_obj = UploadFile(
+            file=BytesIO(content),
+            filename=filename,
+            headers={"content-type": "application/octet-stream"},
+        )
 
-    # Process the file using similar logic to internal_upload_layer
-    layer_id = generate_id(prefix="L")
+        internal_response = await internal_upload_layer(
+            forked_map.id,
+            file_obj,
+            request.name,
+            request.add_layer_to_map,
+            session.get_user_id(),
+            forked_map.project_id,
+        )
+        assert internal_response is not None
 
-    # Handle file processing differently for CSV sources vs downloaded files
-    auxiliary_temp_file_path = None
-    temp_file_path = None
+        return LayerUploadResponse(
+            dag_child_map_id=forked_map.id,
+            dag_parent_map_id=original_map_id,
+            id=internal_response.id,
+            name=internal_response.name,
+            type=internal_response.type,
+            url=internal_response.url,
+            message="Remote layer processed and added successfully",
+        )
 
-    if request.url.startswith("CSV:"):
-        # For CSV sources, we work directly with the remote URL
-        # Set file extension for CSV processing
-        file_ext = ".csv"
-        ogr_source = request.url  # Use the full CSV:/vsicurl/... URL
-    elif (
-        "SERVICE=WFS" in request.url.upper()
-        and "REQUEST=GETFEATURE" in request.url.upper()
-    ):
-        # For WFS sources, we work directly with the remote URL
-        file_ext = ".gml"  # WFS typically returns GML
-        ogr_source = request.url  # Use the WFS URL directly
-    elif (
-        "/FeatureServer" in request.url or "/MapServer" in request.url
-    ) and "/query" in request.url:
-        # For ESRI Feature Service or Map Service URLs - use ESRIJSON driver with prefix
-        file_ext = ".geojson"  # ESRI services return GeoJSON-like data
-        ogr_source = f"ESRIJSON:{request.url}"  # Use ESRIJSON driver prefix
-    else:
-        # Save downloaded content to temporary file for processing
-        import os
+    # external vector sources are converted to local files
+    if layer_type == "vector" and not is_cloud_native:
+        with tempfile.NamedTemporaryFile(suffix=".fgb", delete=False) as t:
+            out_path = t.name
+        os.remove(out_path)
 
-        file_ext = os.path.splitext(urlparse(request.url).path)[1]
-        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
-            temp_file.write(file_content)
-            temp_file.flush()
-            temp_file_path = temp_file.name
-            ogr_source = temp_file_path
+        ogr_cmd = ["ogr2ogr", "-overwrite", "-f", "FlatGeobuf", out_path, ogr_source]
+        if ext == ".csv" or url.startswith(CSV_PREFIX):
+            ogr_cmd += [
+                "-oo",
+                "X_POSSIBLE_NAMES=lon,long,longitude,lng,x",
+                "-oo",
+                "Y_POSSIBLE_NAMES=lat,latitude,y",
+                "-oo",
+                "KEEP_GEOM_COLUMNS=NO",
+                "-a_srs",
+                "EPSG:4326",
+                "-lco",
+                "SPATIAL_INDEX=YES",
+            ]
 
-    # Convert non-FlatGeobuf vector formats to FlatGeobuf for optimal PMTiles generation
-    if layer_type == "vector" and file_ext != ".fgb":
-        # Check if non-CSV data has geometry
-        has_geometry = True
-        if file_ext != ".csv" and not request.url.startswith("CSV:"):
-            # For non-CSV files, check if they have existing geometry
-            try:
-                with fiona.open(ogr_source) as collection:
-                    # Check if schema has geometry field
-                    if not collection.schema or "geometry" not in collection.schema:
-                        has_geometry = False
-                        print("DEBUG: Non-CSV data has no geometry schema")
-                    else:
-                        # Check if any features actually have geometry
-                        if len(collection) > 0:
-                            first_feature = next(iter(collection))
-                            if (
-                                not first_feature
-                                or "geometry" not in first_feature
-                                or not first_feature["geometry"]
-                                or first_feature["geometry"]["type"] == "null"
-                            ):
-                                has_geometry = False
-                        else:
-                            has_geometry = False
-            except Exception:
-                has_geometry = True  # Default to True for non-CSV files
-
-        # Create temp file for FlatGeobuf conversion
-        import os
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".fgb", delete=False) as temp_fgb:
-            auxiliary_temp_file_path = temp_fgb.name
-        # Remove the temp file so ogr2ogr can create it fresh
-        os.remove(auxiliary_temp_file_path)
-
-        # Build ogr2ogr command - only add spatial index if data has geometry
-        ogr_cmd = [
-            "ogr2ogr",
-            "-overwrite",
-            "-f",
-            "FlatGeobuf",
-            auxiliary_temp_file_path,
-            ogr_source,
-        ]
-
-        # Add CSV-specific options for lat/lng column detection if processing CSV
-        if file_ext == ".csv" or request.url.startswith("CSV:"):
-            ogr_cmd.extend(
-                [
-                    "-oo",
-                    "X_POSSIBLE_NAMES=lon,long,longitude,lng,x",
-                    "-oo",
-                    "Y_POSSIBLE_NAMES=lat,latitude,y",
-                    "-oo",
-                    "KEEP_GEOM_COLUMNS=NO",
-                    "-a_srs",
-                    "EPSG:4326",  # Assign WGS84 CRS to CSV lat/lng data
-                ]
-            )
-            # For CSV with lat/lng columns, we can add spatial index since geometry will be created
-            ogr_cmd.extend(["-lco", "SPATIAL_INDEX=YES"])
-        elif has_geometry:
-            ogr_cmd.extend(["-lco", "SPATIAL_INDEX=YES"])
-
-        try:
-            import asyncio
-
-            process = await asyncio.create_subprocess_exec(
-                *ogr_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    process.returncode, ogr_cmd, stderr=stderr.decode()
-                )
-
-            # Use the converted FlatGeobuf file for further processing
-            temp_file_path = auxiliary_temp_file_path
-            ogr_source = auxiliary_temp_file_path
-            file_ext = ".fgb"
-
-        except subprocess.CalledProcessError:
+        proc = await asyncio.create_subprocess_exec(
+            *ogr_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to convert remote file to optimized format. Please check that the URL is accessible and contains valid geospatial data.",
+                detail="Failed to convert remote file to optimized format. Check URL accessibility and validity.",
             )
 
-        try:
-            # Initialize metadata dictionary
-            if request.url.startswith("CSV:"):
-                # For CSV sources, extract filename from the actual Google Sheets URL
-                actual_url = request.url.replace("CSV:/vsicurl/", "")
-                metadata_dict = {
-                    "original_url": request.url,
-                    "source": "remote",
-                    "original_filename": "Google Sheets CSV Export",
-                    "google_sheets_url": actual_url,
-                }
-            else:
-                parsed_url = urlparse(request.url)
-                metadata_dict = {
-                    "original_url": request.url,
-                    "source": "remote",
-                    "original_filename": Path(parsed_url.path).name
-                    or f"remote_file{file_ext}",
-                }
-            bounds = None
-            geometry_type = "unknown"
+        temp_paths_to_cleanup.append(out_path)
+        ogr_source = out_path
+        ext = ".fgb"
+
+    layer_id = generate_id(prefix="L")
+    metadata = {"original_url": url, "source": "remote"}
+    if url.startswith(CSV_PREFIX):
+        metadata.update(
+            {
+                "original_filename": "Google Sheets CSV Export",
+                "google_sheets_url": url.replace("CSV:/vsicurl/", ""),
+            }
+        )
+    else:
+        metadata["original_filename"] = Path(parsed.path).name or f"remote_file{ext}"
+
+    bounds = None
+    geometry_type = "unknown"
+    feature_count = None
+
+    try:
+        layer_result: Optional[VectorProcessingResult] = None
+        processing_source = ogr_source
+
+        if is_cloud_native:
+            li = await get_layer_bounds_and_metadata(processing_source, layer_type, url)
+            bounds = li.bounds
+            geometry_type = li.geometry_type if layer_type == "vector" else "raster"
+            feature_count = li.feature_count
+            metadata.update(li.metadata_updates.model_dump(exclude_none=True))
+            layer_result = None
+        elif layer_type == "vector":
+            layer_result = await process_vector_layer_common(
+                layer_id,
+                processing_source,
+                request.name,
+                session.get_user_id(),
+                forked_map.project_id,
+            )
+            bounds = layer_result.bounds
+            geometry_type = layer_result.geometry_type
+            feature_count = layer_result.feature_count
+            metadata = {
+                **metadata,
+                **layer_result.metadata.model_dump(exclude_none=True),
+            }
+        else:
+            li = await get_layer_bounds_and_metadata(processing_source, layer_type, url)
+            bounds = li.bounds
+            geometry_type = "raster"
             feature_count = None
+            metadata.update(li.metadata_updates.model_dump(exclude_none=True))
 
-            # Process layer based on type using shared utilities
-            processing_source = temp_file_path if temp_file_path else ogr_source
+        async with get_async_db_connection() as conn:
+            await conn.fetchrow(
+                """
+                INSERT INTO map_layers
+                (layer_id, owner_uuid, name, type, metadata, bounds, geometry_type, feature_count, source_map_id, remote_url)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                RETURNING layer_id
+                """,
+                layer_id,
+                session.get_user_id(),
+                request.name,
+                layer_type,
+                json.dumps(metadata),
+                bounds,
+                geometry_type if layer_type == "vector" else None,
+                feature_count,
+                forked_map.id,
+                url,
+            )
 
-            if layer_type == "vector":
-                # Use shared vector processing pipeline
-                layer_result = await process_vector_layer_common(
-                    layer_id,
-                    processing_source,
-                    request.name,
-                    session.get_user_id(),
-                    forked_map.project_id,
-                )
-                bounds = layer_result["bounds"]
-                geometry_type = layer_result["geometry_type"]
-                feature_count = layer_result["feature_count"]
-                # Use the processed metadata which includes PMTiles key
-                metadata_dict = layer_result["metadata"]
-                # Note: MapLibre style generation handled by process_vector_layer_common
-            else:
-                # Handle raster layers
-                layer_info = await get_layer_bounds_and_metadata(
-                    processing_source, layer_type, request.url
-                )
-                bounds = layer_info["bounds"]
-                geometry_type = "raster"
-                feature_count = None
-                metadata_dict.update(layer_info["metadata_updates"])
-
-            # Insert remote layer into database with processing metadata
-            async with get_async_db_connection() as conn:
-                await conn.fetchrow(
-                    """
-                    INSERT INTO map_layers
-                    (layer_id, owner_uuid, name, type, metadata, bounds, geometry_type, feature_count, size_bytes, source_map_id, remote_url)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING layer_id
-                    """,
-                    layer_id,
-                    session.get_user_id(),
-                    request.name,
-                    layer_type,
-                    json.dumps(metadata_dict),
-                    bounds,
-                    geometry_type if layer_type == "vector" else None,
-                    feature_count,
-                    file_size_bytes,
-                    forked_map.id,
-                    request.url,  # Store original remote URL
-                )
-
-                # For vector layers, handle style creation (PMTiles already handled by process_vector_layer_common)
-                if layer_type == "vector" and geometry_type != "unknown":
-                    maplibre_layers = generate_maplibre_layers_for_layer_id(
-                        layer_id, geometry_type
-                    )
+            if (
+                layer_type == "vector"
+                and geometry_type != "unknown"
+                and not is_cloud_native
+            ):
+                assert layer_result is not None
+                maplibre_layers = layer_result.maplibre_style
+                if maplibre_layers:
                     style_id = generate_id(prefix="S")
                     await conn.execute(
-                        """
-                        INSERT INTO layer_styles
-                        (style_id, layer_id, style_json, created_by)
-                        VALUES ($1, $2, $3, $4)
-                        """,
+                        "INSERT INTO layer_styles (style_id, layer_id, style_json, created_by) VALUES ($1,$2,$3,$4)",
                         style_id,
                         layer_id,
                         json.dumps(maplibre_layers),
                         session.get_user_id(),
                     )
-
-                    # Associate style with the map
                     await conn.execute(
-                        """
-                        INSERT INTO map_layer_styles (map_id, layer_id, style_id)
-                        VALUES ($1, $2, $3)
-                        """,
+                        "INSERT INTO map_layer_styles (map_id, layer_id, style_id) VALUES ($1,$2,$3)",
                         forked_map.id,
                         layer_id,
                         style_id,
                     )
 
-                # Add to map if requested
-                if request.add_layer_to_map:
-                    map_data = await conn.fetchrow(
-                        "SELECT layers FROM user_mundiai_maps WHERE id = $1",
-                        forked_map.id,
-                    )
-                    current_layers = (
-                        map_data["layers"] if map_data and map_data["layers"] else []
-                    )
-                    new_layers = current_layers + [layer_id]
-                    await conn.execute(
-                        """
-                        UPDATE user_mundiai_maps
-                        SET layers = $1, last_edited = CURRENT_TIMESTAMP
-                        WHERE id = $2
-                        """,
-                        new_layers,
-                        forked_map.id,
-                    )
+            if request.add_layer_to_map:
+                map_data = await conn.fetchrow(
+                    "SELECT layers FROM user_mundiai_maps WHERE id=$1", forked_map.id
+                )
+                current_layers = (
+                    map_data["layers"] if map_data and map_data["layers"] else []
+                )
+                await conn.execute(
+                    "UPDATE user_mundiai_maps SET layers=$1, last_edited=CURRENT_TIMESTAMP WHERE id=$2",
+                    current_layers + [layer_id],
+                    forked_map.id,
+                )
 
-        finally:
-            # Clean up temp files
-            import os
+    finally:
+        for p in temp_paths_to_cleanup:
+            try:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+            except Exception:
+                pass
 
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-            if auxiliary_temp_file_path and os.path.exists(auxiliary_temp_file_path):
-                os.unlink(auxiliary_temp_file_path)
-
-    # Create layer URL
     layer_url = (
         f"/api/layer/{layer_id}.pmtiles"
         if layer_type == "vector"
         else f"/api/layer/{layer_id}.cog.tif"
     )
 
-    response = LayerUploadResponse(
+    return LayerUploadResponse(
         dag_child_map_id=forked_map.id,
         dag_parent_map_id=original_map_id,
         id=layer_id,
@@ -2125,12 +1970,14 @@ async def add_remote_layer(
         url=layer_url,
         message="Remote layer processed and added successfully",
     )
-    return response
 
 
 async def get_layer_bounds_and_metadata(
-    ogr_source: str, layer_type: str, original_source: str = None
-) -> dict:
+    ogr_source: str,
+    layer_type: str,
+    original_source: Optional[str] = None,
+    dataset_layer: str | None = None,
+) -> LayerBoundsMetadata:
     """
     Extract bounds, geometry type, feature count and other metadata from any OGR/GDAL compatible source.
 
@@ -2142,10 +1989,10 @@ async def get_layer_bounds_and_metadata(
     Returns:
         dict with keys: bounds, geometry_type, feature_count, metadata_updates
     """
-    bounds = None
-    geometry_type = "unknown"
-    feature_count = None
-    metadata_updates = {}
+    bounds: Optional[List[float]] = None
+    geometry_type: str = "unknown"
+    feature_count: Optional[int] = None
+    metadata_updates = MetadataUpdates()
 
     try:
         if layer_type == "raster":
@@ -2170,7 +2017,7 @@ async def get_layer_bounds_and_metadata(
                     src_srs.ImportFromWkt(src_crs)
                     epsg_code = src_srs.GetAuthorityCode(None)
                     if epsg_code:
-                        metadata_updates["original_srid"] = int(epsg_code)
+                        metadata_updates.original_srid = int(epsg_code)
 
                     # Transform bounds to EPSG:4326 if needed
                     if "EPSG:4326" not in src_crs and "WGS84" not in src_crs:
@@ -2187,7 +2034,7 @@ async def get_layer_bounds_and_metadata(
                         band = ds.GetRasterBand(1)
                         stats = band.ComputeStatistics(False)  # [min, max, mean, stdev]
                         min_val, max_val = stats[0], stats[1]
-                        metadata_updates["raster_value_stats_b1"] = {
+                        metadata_updates.raster_value_stats_b1 = {
                             "min": min_val,
                             "max": max_val,
                         }
@@ -2198,11 +2045,16 @@ async def get_layer_bounds_and_metadata(
 
         elif layer_type == "vector":
             # Use Fiona for vector bounds and metadata extraction
-            with fiona.open(ogr_source) as collection:
+            # If a specific sublayer is provided (e.g., GeoPackage table), open it
+            open_kwargs = {}
+            if dataset_layer is not None:
+                open_kwargs["layer"] = dataset_layer
+
+            with fiona.open(ogr_source, **open_kwargs) as collection:
                 # Get bounds and feature count
                 bounds = list(collection.bounds)
                 feature_count = len(collection)
-                metadata_updates["feature_count"] = feature_count
+                metadata_updates.feature_count = feature_count
 
                 # Detect geometry type from schema
                 if collection.schema and "geometry" in collection.schema:
@@ -2223,14 +2075,14 @@ async def get_layer_bounds_and_metadata(
 
                 # Store geometry type in metadata if not unknown
                 if geometry_type != "unknown":
-                    metadata_updates["geometry_type"] = geometry_type
+                    metadata_updates.geometry_type = geometry_type
 
                 # Handle CRS transformation to EPSG:4326
                 src_crs = collection.crs
                 if src_crs:
                     # Store EPSG code if available
                     if hasattr(src_crs, "to_epsg") and src_crs.to_epsg():
-                        metadata_updates["original_srid"] = src_crs.to_epsg()
+                        metadata_updates.original_srid = src_crs.to_epsg()
 
                     # Transform bounds if not already EPSG:4326
                     crs_string = src_crs.to_string()
@@ -2273,12 +2125,12 @@ async def get_layer_bounds_and_metadata(
         # Return defaults on error
         pass
 
-    return {
-        "bounds": bounds,
-        "geometry_type": geometry_type,
-        "feature_count": feature_count,
-        "metadata_updates": metadata_updates,
-    }
+    return LayerBoundsMetadata(
+        bounds=bounds,
+        geometry_type=geometry_type,
+        feature_count=feature_count,
+        metadata_updates=metadata_updates,
+    )
 
 
 async def generate_pmtiles_from_ogr_source(
@@ -2287,7 +2139,8 @@ async def generate_pmtiles_from_ogr_source(
     feature_count: int,
     user_id: str = None,
     project_id: str = None,
-):
+    dataset_layer: str | None = None,
+) -> str:
     """Generate PMTiles from any OGR-compatible source and store in S3."""
     bucket_name = get_bucket_name()
 
@@ -2323,6 +2176,10 @@ async def generate_pmtiles_from_ogr_source(
             )
 
         ogr_cmd.extend([reprojected_file, ogr_source])
+        # If a specific dataset layer is requested (e.g., GeoPackage sublayer),
+        # pass it as an additional source argument to ogr2ogr to select that layer.
+        if dataset_layer is not None:
+            ogr_cmd.append(dataset_layer)
 
         process = await asyncio.create_subprocess_exec(
             *ogr_cmd,
@@ -2342,25 +2199,46 @@ async def generate_pmtiles_from_ogr_source(
             "-o",
             local_output_file,
             "-q",  # Quiet mode - suppress progress indicators
+            "-zg",  # Always try to guess maxzoom
+            "--drop-densest-as-needed",
+            reprojected_file,
         ]
-        if feature_count > 1:
-            tippecanoe_cmd.append(
-                "-zg"
-            )  # Can't guess maxzoom (-zg) without at least two distinct feature locations
-        tippecanoe_cmd.extend(
-            [
-                "--drop-densest-as-needed",
-                reprojected_file,
-            ]
-        )
 
-        process = await asyncio.create_subprocess_exec(*tippecanoe_cmd)
-        await process.wait()
+        process = await asyncio.create_subprocess_exec(
+            *tippecanoe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            raise Exception(
-                f"tippecanoe command failed with exit code {process.returncode}"
-            )
+            err_text = (stderr or b"").decode("utf-8", errors="ignore")
+            # If tippecanoe can't guess maxzoom for single-point datasets, fall back to ogr2ogr PMTiles
+            if (
+                "Can't guess maxzoom (-zg) without at least two distinct feature locations"
+                in err_text
+            ):
+                pmtiles_ogr_cmd = [
+                    "ogr2ogr",
+                    "-f",
+                    "PMTiles",
+                    local_output_file,
+                    reprojected_file,
+                ]
+                process2 = await asyncio.create_subprocess_exec(
+                    *pmtiles_ogr_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout2, stderr2 = await process2.communicate()
+                if process2.returncode != 0:
+                    raise Exception(
+                        f"ogr2ogr PMTiles fallback failed: {(stderr2 or b'').decode('utf-8', errors='ignore')}"
+                    )
+            else:
+                raise Exception(
+                    f"tippecanoe command failed with exit code {process.returncode}: {err_text}"
+                )
 
         # Upload the PMTiles file to S3 with user_id and project_id in path if available
         if user_id and project_id:
@@ -2406,8 +2284,13 @@ async def generate_pmtiles_from_ogr_source(
 
 
 async def process_vector_layer_common(
-    layer_id: str, ogr_source: str, layer_name: str, user_id: str, project_id: str
-) -> dict:
+    layer_id: str,
+    ogr_source: str,
+    layer_name: str,
+    user_id: str,
+    project_id: str,
+    dataset_layer: str | None = None,
+) -> VectorProcessingResult:
     """
     Unified processing pipeline for vector layers from any source.
 
@@ -2422,23 +2305,21 @@ async def process_vector_layer_common(
         dict with processed layer data ready for database insertion
     """
     # Extract bounds and metadata from the source
-    layer_info = await get_layer_bounds_and_metadata(ogr_source, "vector")
-
-    bounds = layer_info["bounds"]
-    geometry_type = layer_info["geometry_type"]
-    feature_count = layer_info["feature_count"]
-    metadata_dict = layer_info["metadata_updates"].copy()
-
-    # Add base metadata
-    metadata_dict.update(
-        {
-            "source": "remote" if not ogr_source.startswith("/") else "upload",
-            "layer_name": layer_name,
-        }
+    layer_info = await get_layer_bounds_and_metadata(
+        ogr_source, "vector", dataset_layer=dataset_layer
     )
 
+    bounds = layer_info.bounds
+    geometry_type = layer_info.geometry_type
+    feature_count = layer_info.feature_count
+    metadata_updates = layer_info.metadata_updates
+
+    # Add base metadata
+    metadata_updates.source = "remote" if not ogr_source.startswith("/") else "upload"
+    metadata_updates.layer_name = layer_name
+
     # Generate PMTiles for vector layers with features
-    pmtiles_key = None
+    pmtiles_key: Optional[str] = None
     if feature_count and feature_count > 0:
         try:
             pmtiles_key = await generate_pmtiles_from_ogr_source(
@@ -2447,32 +2328,33 @@ async def process_vector_layer_common(
                 feature_count,
                 user_id,
                 project_id,
+                dataset_layer=dataset_layer,
             )
-            metadata_dict["pmtiles_key"] = pmtiles_key
+            metadata_updates.pmtiles_key = pmtiles_key
         except Exception as e:
             print(f"PMTiles generation failed for {ogr_source}: {e}")
             # Continue without PMTiles - not critical
 
     # Generate MapLibre style for vector layers
-    maplibre_style = None
+    maplibre_style: Optional[List[dict]] = None
     if geometry_type != "unknown":
         maplibre_style = generate_maplibre_layers_for_layer_id(layer_id, geometry_type)
 
-    return {
-        "layer_id": layer_id,
-        "bounds": bounds,
-        "geometry_type": geometry_type,
-        "feature_count": feature_count,
-        "metadata": metadata_dict,
-        "pmtiles_key": pmtiles_key,
-        "maplibre_style": maplibre_style,
-        "layer_type": "vector",
-    }
+    return VectorProcessingResult(
+        layer_id=layer_id,
+        bounds=bounds,
+        geometry_type=geometry_type,
+        feature_count=feature_count,
+        metadata=metadata_updates,
+        pmtiles_key=pmtiles_key,
+        maplibre_style=maplibre_style,
+        layer_type="vector",
+    )
 
 
 @router.put("/{map_id}/layer/{layer_id}", operation_id="add_layer_to_map")
 async def add_layer_to_map(
-    map: MundiMap = Depends(get_map),
+    map: MundiMap = Depends(edit_map),
     layer: MapLayer = Depends(get_layer),
 ):
     if map.layers is not None and layer.id in map.layers:
@@ -2560,12 +2442,8 @@ async def render_map(
 
     Width and height are in pixels.
     """
-    style_json = await get_map_style(
-        request,
-        map.id,
-        only_show_inline_sources=True,
-        session=session,
-        base_map=base_map,
+    style_json = await get_map_style_internal(
+        str(map.id), base_map, only_show_inline_sources=True
     )
 
     return (
@@ -2719,6 +2597,63 @@ async def remove_layer_from_map(
     )
 
 
+@router.patch("/{map_id}", operation_id="update_map", summary="Update map")
+async def update_map(
+    update_data: MapUpdateRequest,
+    map: MundiMap = Depends(get_map),
+):
+    """Updates an existing map's properties. Currently supports updating
+    the map's basemap style.
+
+    The basemap determines the background map tiles displayed beneath your
+    data layers. Available basemap options for Mundi cloud are from MapTiler:
+    - `hybrid` - Satellite imagery
+    - `basic-v2` - Basic street map (default)
+    - `dataviz` - Light basemap for data visualization
+    - `dataviz-dark` - Dark basemap for data visualization
+    - `outdoor-v2` - Outdoor/terrain map
+
+    ```py
+    result = httpx.patch(
+        "https://app.mundi.ai/api/maps/MWfqcRak59bo",
+        json={"basemap": "hybrid"},
+        headers={"Authorization": f"Bearer {os.environ['MUNDI_API_KEY']}"}
+    ).json()
+
+    assert result == {
+        "id": "MWfqcRak59bo",
+        "basemap": "hybrid",
+        "message": "Map updated successfully"
+    }
+    ```"""
+    if update_data.basemap is None:
+        return {"message": "No basemap update provided"}
+
+    async with async_conn("update_map") as conn:
+        updated_map = await conn.fetchrow(
+            """
+            UPDATE user_mundiai_maps
+            SET basemap = $1, last_edited = CURRENT_TIMESTAMP
+            WHERE id = $2
+            RETURNING id, basemap
+        """,
+            update_data.basemap,
+            map.id,
+        )
+
+        if not updated_map:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update map",
+            )
+
+        return {
+            "message": "Map updated successfully",
+            "map_id": updated_map["id"],
+            "basemap": updated_map["basemap"],
+        }
+
+
 @router.get("/", operation_id="list_user_maps", response_model=UserMapsResponse)
 async def get_user_maps(
     request: Request, session: UserContext = Depends(verify_session_required)
@@ -2737,9 +2672,8 @@ async def get_user_maps(
         # Get all maps owned by this user that are not soft-deleted
         maps_data = await conn.fetch(
             """
-            SELECT m.id, m.title, m.description, m.created_on, m.last_edited, p.link_accessible, m.project_id
+            SELECT m.id, m.title, m.description, m.created_on, m.last_edited, m.project_id
             FROM user_mundiai_maps m
-            JOIN user_mundiai_projects p ON m.project_id = p.id
             WHERE m.owner_uuid = $1 AND m.soft_deleted_at IS NULL
             ORDER BY m.last_edited DESC
             """,
@@ -2749,27 +2683,14 @@ async def get_user_maps(
         # Convert datetime objects to ISO format strings for JSON serialization
         maps_response = []
         for map_data in maps_data:
-            # Convert datetime objects to strings
-            created_on = (
-                map_data["created_on"].isoformat()
-                if isinstance(map_data["created_on"], datetime)
-                else map_data["created_on"]
-            )
-            last_edited = (
-                map_data["last_edited"].isoformat()
-                if isinstance(map_data["last_edited"], datetime)
-                else map_data["last_edited"]
-            )
-
             maps_response.append(
-                {
-                    "id": map_data["id"],
-                    "project_id": map_data["project_id"],
-                    "title": map_data["title"] or "Untitled Map",
-                    "description": map_data["description"] or "",
-                    "created_on": created_on,
-                    "last_edited": last_edited,
-                }
+                MapResponse(
+                    id=map_data["id"],
+                    project_id=map_data["project_id"],
+                    title=map_data["title"] or "Untitled Map",
+                    created_on=map_data["created_on"].isoformat(),
+                    map_link=f"{os.environ['WEBSITE_DOMAIN']}/project/{map_data['project_id']}",
+                )
             )
 
         # Return the list of maps

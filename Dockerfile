@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g-dev libtiff-dev libgeotiff-dev libpng-dev libjpeg-dev \
         python3-dev python3-numpy python3-setuptools \
         libpq-dev \
+        libgeos-dev \
     && rm -rf /var/lib/apt/lists/* \
     && wget https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz \
     && tar -xzf gdal-${GDAL_VERSION}.tar.gz \
@@ -65,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 libexpat1 libcurl4 \
         zlib1g libtiff6 libgeotiff5 libpng16-16 libjpeg62-turbo \
         libpq5 \
+        libgeos-c1v5 \
     && rm -rf /var/lib/apt/lists/*
 
 # fetch GDAL stuff from builder
@@ -114,14 +116,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM node:20-bookworm-slim AS frontend-builder
 WORKDIR /app/frontendts
 COPY frontendts/package*.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --legacy-peer-deps
+RUN --mount=type=cache,target=/root/.npm npm ci --legacy-peer-deps
 ARG VITE_WEBSITE_DOMAIN
-ARG VITE_EMAIL_VERIFICATION
 COPY frontendts/ ./
-ENV VITE_WEBSITE_DOMAIN=$VITE_WEBSITE_DOMAIN
-ENV VITE_EMAIL_VERIFICATION=$VITE_EMAIL_VERIFICATION
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV VITE_WEBSITE_DOMAIN=$VITE_WEBSITE_DOMAIN \
+    NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
 # LAStools

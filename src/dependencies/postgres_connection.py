@@ -24,7 +24,7 @@ from fastapi import HTTPException, status
 import logging
 import ssl
 
-from ..structures import get_async_db_connection
+from src.structures import get_async_db_connection
 
 logger = logging.getLogger(__name__)
 

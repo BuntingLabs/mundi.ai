@@ -42,20 +42,13 @@ async def test_postgres_error_stored_in_database(auth_client):
 
     await asyncio.sleep(3)
 
-    projects_response = await auth_client.get("/api/projects/")
-    assert projects_response.status_code == 200
-    projects_data = projects_response.json()
+    # Fetch project sources and verify one connection with error
+    sources_response = await auth_client.get(f"/api/projects/{project_id}/sources")
+    assert sources_response.status_code == 200
+    sources = sources_response.json()
+    assert len(sources) == 1
 
-    test_project = None
-    for project in projects_data["projects"]:
-        if project["id"] == project_id:
-            test_project = project
-            break
-
-    assert test_project is not None
-    assert len(test_project["postgres_connections"]) == 1
-
-    postgres_conn = test_project["postgres_connections"][0]
+    postgres_conn = sources[0]
     assert "last_error_text" in postgres_conn
     assert "last_error_timestamp" in postgres_conn
 
@@ -68,10 +61,13 @@ async def test_postgres_error_stored_in_database(auth_client):
     assert error_text == "Unexpected error: [Errno -2] Name or service not known"
     assert error_timestamp is not None
 
-    project_detail_response = await auth_client.get(f"/api/projects/{project_id}")
-    assert project_detail_response.status_code == 200
-    project_detail = project_detail_response.json()
-
-    detail_postgres_conn = project_detail["postgres_connections"][0]
+    # Verify details via sources endpoint are consistent
+    detail_sources_response = await auth_client.get(
+        f"/api/projects/{project_id}/sources"
+    )
+    assert detail_sources_response.status_code == 200
+    detail_sources = detail_sources_response.json()
+    assert len(detail_sources) == 1
+    detail_postgres_conn = detail_sources[0]
     assert detail_postgres_conn["last_error_text"] == error_text
     assert detail_postgres_conn["last_error_timestamp"] is not None

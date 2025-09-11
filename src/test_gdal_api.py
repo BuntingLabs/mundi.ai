@@ -21,7 +21,7 @@ import os
 async def test_map_with_layers(auth_client):
     """Create a test map with both vector and raster layers."""
 
-    project = {"layers": []}
+    project = {}
 
     # Create a map via the API
     payload = {

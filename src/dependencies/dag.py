@@ -14,6 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from fastapi import Path, Depends, HTTPException
+import os
 
 from src.database.models import MundiMap, MundiProject, MapLayer
 from src.structures import async_conn
@@ -35,7 +36,7 @@ async def forked_map(
     async with async_conn("forked_map") as conn:
         source_map = await conn.fetchrow(
             """
-            SELECT m.id, m.project_id, m.title, m.description, m.layers
+            SELECT m.id, m.project_id, m.title, m.description, m.layers, m.basemap
             FROM user_mundiai_maps m
             WHERE m.id = $1 AND m.soft_deleted_at IS NULL AND m.owner_uuid = $2
             """,
@@ -57,8 +58,8 @@ async def forked_map(
         row = await conn.fetchrow(
             """
             INSERT INTO user_mundiai_maps
-            (id, project_id, owner_uuid, parent_map_id, title, description, layers, display_as_diff, fork_reason)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8)
+            (id, project_id, owner_uuid, parent_map_id, title, description, layers, fork_reason, basemap)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             new_map_id,
@@ -69,6 +70,7 @@ async def forked_map(
             source_map["description"],
             source_map["layers"] or [],
             fork_reason.value,
+            source_map["basemap"],
         )
         new_map = MundiMap(**dict(row))
 
@@ -176,3 +178,25 @@ async def get_project(
             raise HTTPException(404, f"Project {project_id} not found")
 
         return MundiProject(**dict(project_row))
+
+
+# MUNDI_AUTH_MODE guards whether or not mundi data is editable
+# https://docs.mundi.ai/deployments/self-hosting-mundi/
+async def edit_project(project: MundiProject = Depends(get_project)) -> MundiProject:
+    mode = (os.environ.get("MUNDI_AUTH_MODE") or "edit").lower()
+    if mode != "edit":
+        raise HTTPException(
+            status_code=403,
+            detail="Editing disabled when MUNDI_AUTH_MODE not set to edit",
+        )
+    return project
+
+
+async def edit_map(map: MundiMap = Depends(get_map)) -> MundiMap:
+    mode = (os.environ.get("MUNDI_AUTH_MODE") or "edit").lower()
+    if mode != "edit":
+        raise HTTPException(
+            status_code=403,
+            detail="Editing disabled when MUNDI_AUTH_MODE not set to edit",
+        )
+    return map

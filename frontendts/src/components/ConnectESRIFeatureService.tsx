@@ -138,7 +138,7 @@ export const ConnectESRIFeatureService: React.FC<ConnectESRIFeatureServiceProps>
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          url: processedUrl,
+          url: `ESRIJSON:${processedUrl}`,
           name: layerName,
           add_layer_to_map: true,
           source_type: 'vector', // ESRI Feature Service is treated as vector on backend

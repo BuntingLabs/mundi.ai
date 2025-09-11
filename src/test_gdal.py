@@ -16,7 +16,7 @@
 import subprocess
 import pytest
 from pathlib import Path
-from .test_mbgl_renderer import compare_images
+from src.test_mbgl_renderer import compare_images
 
 # Reference images directory
 REFERENCE_DIR = Path(__file__).parent.parent / "test_fixtures" / "reference_images"
@@ -48,14 +48,12 @@ async def dem_map_with_cog_layer(auth_client):
     """
 
     # 1. Create an empty map
-    project_payload = {"layers": []}
-    map_create_payload = {
-        "project": project_payload,
-        "title": "Test Map with DEM COG Layer",
-        "description": "A map for testing DEM layer with COG URL",
-    }
-
-    response = await auth_client.post("/api/maps/create", json=map_create_payload)
+    response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Test Map with DEM COG Layer",
+        },
+    )
     response.raise_for_status()
     map_data = response.json()
     map_id = map_data["id"]

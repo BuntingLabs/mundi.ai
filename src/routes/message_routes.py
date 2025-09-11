@@ -37,8 +37,10 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_tool_message_param import (
     ChatCompletionToolMessageParam,
 )
-from openai.types.chat.chat_completion_message_param import (
+from openai.types.chat.chat_completion_user_message_param import (
     ChatCompletionUserMessageParam,
+)
+from openai.types.chat.chat_completion_system_message_param import (
     ChatCompletionSystemMessageParam,
 )
 from openai.types.chat.chat_completion_message_param import (
@@ -63,6 +65,7 @@ from src.routes.postgres_routes import (
     generate_id,
     get_map_description,
     internal_upload_layer,
+    InternalLayerUploadResponse,
 )
 from src.geoprocessing.dispatch import (
     UnsupportedAlgorithmError,
@@ -261,7 +264,11 @@ class MapTreeResponse(BaseModel):
     operation_id="get_map_tree",
     response_model=MapTreeResponse,
 )
-async def get_map_tree(map: MundiMap = Depends(get_map), conversation_id: int = None):
+async def get_map_tree(
+    map: MundiMap = Depends(get_map),
+    conversation_id: int | None = None,
+    session: UserContext = Depends(verify_session_required),
+):
     leaf_map_id = map.id
     project_id = map.project_id
 
@@ -318,7 +325,7 @@ async def get_map_tree(map: MundiMap = Depends(get_map), conversation_id: int = 
         if all_layer_ids:
             db_layers = await conn.fetch(
                 """
-                SELECT layer_id, owner_uuid, name, s3_key, type, raster_cog_url,
+                SELECT layer_id, owner_uuid, name, s3_key, type,
                        postgis_connection_id, postgis_query, metadata, bounds, geometry_type,
                        feature_count, size_bytes, source_map_id, created_on, last_edited
                 FROM map_layers
@@ -334,12 +341,31 @@ async def get_map_tree(map: MundiMap = Depends(get_map), conversation_id: int = 
         # Fetch all messages from the conversation if conversation_id is provided
         db_messages = []
         if conversation_id is not None:
+            conv_ok = await conn.fetchrow(
+                """
+                SELECT 1
+                FROM conversations c
+                WHERE c.id = $1
+                  AND c.owner_uuid = $2
+                  AND c.project_id = $3
+                  AND c.soft_deleted_at IS NULL
+                """,
+                conversation_id,
+                session.get_user_id(),
+                map.project_id,
+            )
+            if not conv_ok:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversation not found",
+                )
+
             db_messages = await conn.fetch(
                 """
-                SELECT *
-                FROM chat_completion_messages
-                WHERE conversation_id = $1
-                ORDER BY created_at ASC
+                SELECT ccm.*
+                FROM chat_completion_messages ccm
+                WHERE ccm.conversation_id = $1
+                ORDER BY ccm.created_at ASC
                 """,
                 conversation_id,
             )
@@ -589,13 +615,15 @@ async def run_geoprocessing_tool(
                         file=io.BytesIO(file_content),
                     )
 
-                    upload_result = await internal_upload_layer(
-                        map_id=map_id,
-                        file=upload_file,
-                        layer_name=filename,
-                        add_layer_to_map=False,
-                        user_id=user_id,
-                        project_id=project_id,
+                    upload_result: InternalLayerUploadResponse = (
+                        await internal_upload_layer(
+                            map_id=map_id,
+                            file=upload_file,
+                            layer_name=filename,
+                            add_layer_to_map=False,
+                            user_id=user_id,
+                            project_id=project_id,
+                        )
                     )
 
                     created_layers.append(

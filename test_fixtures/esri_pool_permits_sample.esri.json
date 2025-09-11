@@ -1,0 +1,53 @@
+{
+  "objectIdFieldName": "OBJECTID",
+  "geometryType": "esriGeometryPolygon",
+  "spatialReference": { "wkid": 4326 },
+  "fields": [
+    { "name": "OBJECTID", "type": "esriFieldTypeOID" },
+    { "name": "apn", "type": "esriFieldTypeString" }
+  ],
+  "features": [
+    {
+      "attributes": { "OBJECTID": 1, "apn": "123-0" },
+      "geometry": {
+        "rings": [
+          [
+            [ -117.46, 32.70 ],
+            [ -117.00, 32.70 ],
+            [ -117.00, 33.00 ],
+            [ -117.46, 33.00 ],
+            [ -117.46, 32.70 ]
+          ]
+        ]
+      }
+    },
+    {
+      "attributes": { "OBJECTID": 2, "apn": "123-1" },
+      "geometry": {
+        "rings": [
+          [
+            [ -117.40, 32.80 ],
+            [ -117.10, 32.80 ],
+            [ -117.10, 32.90 ],
+            [ -117.40, 32.90 ],
+            [ -117.40, 32.80 ]
+          ]
+        ]
+      }
+    },
+    {
+      "attributes": { "OBJECTID": 3, "apn": "123-2" },
+      "geometry": {
+        "rings": [
+          [
+            [ -117.30, 32.85 ],
+            [ -117.20, 32.85 ],
+            [ -117.20, 32.95 ],
+            [ -117.30, 32.95 ],
+            [ -117.30, 32.85 ]
+          ]
+        ]
+      }
+    }
+  ]
+}

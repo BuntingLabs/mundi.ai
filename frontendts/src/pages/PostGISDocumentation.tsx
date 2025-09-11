@@ -52,11 +52,11 @@ const PostGISDocumentation = () => {
       let foundConnectionName = '';
 
       for (const project of projectsData.projects) {
-        // Get the full project details which includes postgres_connections
-        const projectResponse = await fetch(`/api/projects/${project.id}`);
-        if (projectResponse.ok) {
-          const projectDetails = await projectResponse.json();
-          const connection = projectDetails.postgres_connections?.find((c: PostgresConnection) => c.connection_id === connectionId);
+        // Fetch project sources (PostGIS connections) for this project
+        const sourcesResponse = await fetch(`/api/projects/${project.id}/sources`);
+        if (sourcesResponse.ok) {
+          const sources = (await sourcesResponse.json()) as PostgresConnection[];
+          const connection = sources.find((c) => c.connection_id === connectionId);
           if (connection) {
             foundProjectId = project.id;
             foundConnectionName = connection.friendly_name || connection.connection_name || 'Database';

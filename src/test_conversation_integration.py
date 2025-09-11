@@ -60,9 +60,7 @@ async def test_conversation_project_integration(
     new_map_response = await auth_client.post(
         "/api/maps/create",
         json={
-            "project": {"layers": []},
             "title": "Test Map 2",
-            "description": "Second map for testing conversation isolation",
         },
     )
     new_map_response.raise_for_status()

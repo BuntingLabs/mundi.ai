@@ -18,7 +18,8 @@ from functools import lru_cache
 from typing import Tuple
 import secrets
 from src.structures import get_async_db_connection
-from .postgres_connection import PostgresConnectionManager
+from src.dependencies.postgres_connection import PostgresConnectionManager
+from src.dependencies.chat_completions import ChatArgsProvider
 from redis import Redis
 from openai import AsyncOpenAI
 import os
@@ -48,6 +49,8 @@ class DatabaseDocumenter(ABC):
         connection_name: str,
         connection_manager: PostgresConnectionManager,
         openai_client: AsyncOpenAI,
+        chat_args_provider: ChatArgsProvider,
+        user_id: str,
     ) -> Tuple[str, str]:
         """
         Generate database documentation and friendly name.
@@ -64,6 +67,8 @@ class DefaultDatabaseDocumenter(DatabaseDocumenter):
         connection_name: str,
         connection_manager: PostgresConnectionManager,
         openai_client: AsyncOpenAI,
+        chat_args_provider: ChatArgsProvider,
+        user_id: str,
     ) -> Tuple[str, str]:
         """
         Generate basic database documentation and friendly name.
@@ -137,8 +142,11 @@ Tables: {", ".join(table_names)}
 
 Respond with ONLY the friendly name, no additional text."""
 
+            name_chat_args = await chat_args_provider.get_args(
+                user_id, "generate_database_docs"
+            )
             name_response = await openai_client.chat.completions.create(
-                model="gpt-4.1-nano",
+                **name_chat_args,
                 messages=[
                     {"role": "user", "content": name_prompt},
                 ],
@@ -165,8 +173,11 @@ Database Name: {connection_name}
 Schema:
 {schema_description}"""
 
+            doc_chat_args = await chat_args_provider.get_args(
+                user_id, "generate_database_docs"
+            )
             response = await openai_client.chat.completions.create(
-                model="gpt-4.1-nano",
+                **doc_chat_args,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

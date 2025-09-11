@@ -1,7 +1,7 @@
-import { BookOpen, Cloud, House, KeyRound, LogIn, LogOut, PanelRightClose, PanelRightOpen, UserPlus } from 'lucide-react';
+import { AccountMenu, ScheduleCallButton } from '@mundi/ee';
+import { BookOpen, Cloud, House, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { Suspense } from 'react';
 import { Link } from 'react-router-dom';
-import Session, { signOut } from 'supertokens-auth-react/recipe/session';
 import BuntingBirdSvg from '@/assets/bunting_bird.svg';
 import MDarkSvg from '@/assets/M-dark.svg';
 import MLightSvg from '@/assets/M-light.svg';
@@ -23,19 +23,12 @@ import {
 } from '@/components/ui/sidebar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useProjects } from '@/contexts/ProjectsContext';
-import { ScheduleCallButton } from '@/lib/ee-loader';
 import type { MapProject } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 
 export function AppSidebar() {
-  const sessionContext = Session.useSessionContext();
   const { state, toggleSidebar } = useSidebar();
   const { allProjects, allProjectsLoading } = useProjects();
-
-  async function onLogout() {
-    await signOut();
-    window.location.href = '/auth'; // or redirect to wherever the login page is
-  }
 
   const recentProjects: MapProject[] = allProjects
     .sort(
@@ -83,85 +76,41 @@ export function AppSidebar() {
         )}
       </SidebarHeader>
       <SidebarContent>
-        {!sessionContext.loading && sessionContext.doesSessionExist && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Projects</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild tooltip="Home">
-                    <Link to={`/`}>
-                      <House className="w-4 h-4 mr-2" />
-                      <span className="text-sm">Home</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                {!allProjectsLoading && state === 'expanded' && (
-                  <>
-                    {recentProjects.map((project) => (
-                      <SidebarMenuItem key={project.id}>
-                        <SidebarMenuButton asChild>
-                          <Link to={`/project/${project.id}`} className="flex items-center justify-between w-full">
-                            <span className="text-sm">{project.title || `Untitled Map`}</span>
-                            <span className="text-xs text-muted-foreground ml-2">
-                              {formatRelativeTime(project.most_recent_version?.last_edited)}
-                            </span>
-                          </Link>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    ))}
-                  </>
-                )}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
-
         <SidebarGroup>
-          <SidebarGroupLabel>Account</SidebarGroupLabel>
+          <SidebarGroupLabel>Projects</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {!sessionContext.loading &&
-                (sessionContext.doesSessionExist ? (
-                  <>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton onClick={onLogout} className="cursor-pointer" tooltip="Logout">
-                        <LogOut className="w-4 h-4 mr-2" />
-                        <span className="text-sm">Logout</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  </>
-                ) : (
-                  <>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild tooltip="Sign In">
-                        <Link to="/auth">
-                          <LogIn className="w-4 h-4 mr-2" />
-                          <span className="text-sm">Sign In</span>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild tooltip="Home">
+                  <Link to={`/`}>
+                    <House className="w-4 h-4 mr-2" />
+                    <span className="text-sm">Home</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              {!allProjectsLoading && state === 'expanded' && (
+                <>
+                  {recentProjects.map((project) => (
+                    <SidebarMenuItem key={project.id}>
+                      <SidebarMenuButton asChild>
+                        <Link to={`/project/${project.id}`} className="flex items-center justify-between w-full">
+                          <span className="text-sm">{project.title || `Untitled Map`}</span>
+                          <span className="text-xs text-muted-foreground ml-2">
+                            {formatRelativeTime(project.most_recent_version?.last_edited)}
+                          </span>
                         </Link>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild tooltip="Sign Up">
-                        <Link to="/auth?show=signup">
-                          <UserPlus className="w-4 h-4 mr-2" />
-                          <span className="text-sm">Sign Up</span>
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild tooltip="Forgot Password">
-                        <Link to="/auth/reset-password">
-                          <KeyRound className="w-4 h-4 mr-2" />
-                          <span className="text-sm">Forgot Password</span>
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  </>
-                ))}
+                  ))}
+                </>
+              )}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        <Suspense fallback={null}>
+          <AccountMenu />
+        </Suspense>
         <SidebarGroup>
           <SidebarGroupLabel>About</SidebarGroupLabel>
           <SidebarGroupContent>

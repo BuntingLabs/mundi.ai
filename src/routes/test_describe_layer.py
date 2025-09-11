@@ -22,12 +22,12 @@ import re
 @pytest.fixture
 async def test_map_with_coho_layer(auth_client):
     random.seed(42)
-    map_payload = {
-        "project": {"layers": [], "crs": {"epsg_code": 3857}},
-        "title": "Layer Description Test Map",
-        "description": "Test map for layer description endpoint",
-    }
-    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    map_response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Layer Description Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
     file_path = str(
@@ -139,12 +139,12 @@ async def test_describe_layer_endpoint(test_map_with_coho_layer, auth_client):
 @pytest.fixture
 async def test_map_with_point_cloud_layer(auth_client):
     random.seed(42)
-    map_payload = {
-        "project": {"layers": [], "crs": {"epsg_code": 3857}},
-        "title": "Point Cloud Layer Description Test Map",
-        "description": "Test map for point cloud layer description endpoint",
-    }
-    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    map_response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Point Cloud Layer Description Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
     file_path = str(

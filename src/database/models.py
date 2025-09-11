@@ -81,9 +81,7 @@ class MundiMap(Base):
         String(12), ForeignKey("user_mundiai_maps.id"), nullable=True
     )
     layers = Column(ARRAY(String(12)))
-    display_as_diff = Column(
-        Boolean, default=True
-    )  # if true, diff from previous. false locks in changes
+    display_as_diff = Column(Boolean, nullable=True)  # deprecated
     title = Column(String)
     description = Column(String)
     created_on = Column(
@@ -97,6 +95,7 @@ class MundiMap(Base):
         server_default=func.current_timestamp(),
     )
     fork_reason = Column(String, nullable=True)
+    basemap = Column(String(50), nullable=True)
     soft_deleted_at = Column(TIMESTAMP(timezone=True))
 
     # Relationships
@@ -167,7 +166,7 @@ class MapLayer(Base):
     type = Column(
         String, nullable=False
     )  # 'vector', 'raster', 'postgis', 'point_cloud'
-    raster_cog_url = Column(String)  # Can be NULL
+    raster_cog_url = Column(String)  # DEPRECATED: unused field, can be NULL
     postgis_connection_id = Column(
         String(12), ForeignKey("project_postgres_connections.id")
     )
@@ -301,12 +300,9 @@ class MapLayer(Base):
                 elif self.remote_url.startswith("CSV:/vsicurl/"):
                     # CSV URLs are already prefixed, use as-is
                     yield self.remote_url
-                elif (
-                    "/FeatureServer" in self.remote_url
-                    or "/MapServer" in self.remote_url
-                ) and "/query" in self.remote_url:
-                    # ESRI Feature Service or Map Service URLs - use ESRIJSON driver with prefix
-                    yield f"ESRIJSON:{self.remote_url}"
+                elif self.remote_url.startswith("ESRIJSON:"):
+                    # ESRI Feature Service or Map Service URLs with ESRIJSON prefix
+                    yield self.remote_url
                 else:
                     # Regular remote URL: use vsicurl
                     yield f"/vsicurl/{self.remote_url}"

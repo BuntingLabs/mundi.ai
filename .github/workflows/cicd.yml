@@ -22,8 +22,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Initialize submodules
-      run: git submodule update --init --recursive
 
     - uses: depot/setup-action@v1
 
@@ -33,9 +31,9 @@ jobs:
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-    # ─ build application & DriftDB images with Depot bake ─
+    # ─ build application image with Depot bake ─
     - id: bake
-      name: Bake application & DriftDB images
+      name: Bake application image
       uses: depot/bake-action@v1
       with:
         project: 9lr9tw2kzl
@@ -45,12 +43,11 @@ jobs:
           app.tags=${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
           app.args.VITE_WEBSITE_DOMAIN=http://localhost:8000
           app.args.VITE_EMAIL_VERIFICATION=disable
-          driftdb.tags=driftdb-local
 
     - uses: depot/pull-action@v1
       with:
         build-id: ${{ steps.bake.outputs.build-id }}
-        targets: app,driftdb,qgis-processing
+        targets: app,qgis-processing
 
     - name: Add main tag
       run: docker tag ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }} ${{ env.IMAGE_REPO }}:main
@@ -62,7 +59,6 @@ jobs:
     - name: Compose up & run tests
       env:
         APP_IMAGE: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
-        DRIFTDB_IMAGE: driftdb-local
       run: docker compose run app pytest -xvs -n auto
 
     - name: Push image

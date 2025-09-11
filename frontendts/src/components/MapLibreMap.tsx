@@ -1,8 +1,8 @@
 // Copyright Bunting Labs, Inc. 2025
 
-import { useQuery } from '@tanstack/react-query';
-import { useConnectionStatus, usePresence } from 'driftdb-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import legendSymbol, { type RenderElement } from 'legend-symbol-ts';
+import { BasemapControl } from './BasemapControl';
 
 function renderTree(tree: RenderElement | null): JSX.Element | null {
   if (!tree) return null;
@@ -47,8 +47,6 @@ import type {
   MapProject,
   MapTreeResponse,
   MessageSendRequest,
-  PointerPosition,
-  PresenceData,
   SanitizedMessage,
 } from '../lib/types';
 
@@ -66,72 +64,6 @@ const KUE_MESSAGE_STYLE = `
 `;
 
 const SWAP_XY = new Matrix4().set(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
-
-// Custom Globe Control class
-class GlobeControl implements IControl {
-  private _container: HTMLDivElement | undefined;
-  private _availableBasemaps: string[];
-  private _currentBasemap: string;
-  private _onBasemapChange: (basemap: string) => void;
-
-  constructor(availableBasemaps: string[], currentBasemap: string, onBasemapChange: (basemap: string) => void) {
-    this._availableBasemaps = availableBasemaps;
-    this._currentBasemap = currentBasemap;
-    this._onBasemapChange = onBasemapChange;
-  }
-
-  onAdd(_map: MLMap): HTMLElement {
-    this._container = document.createElement('div');
-    this._container.className = 'maplibregl-ctrl maplibregl-ctrl-group';
-
-    const button = document.createElement('button');
-    button.className = 'maplibregl-ctrl-globe';
-    button.type = 'button';
-    button.title = 'Toggle satellite basemap';
-    button.setAttribute('aria-label', 'Toggle satellite basemap');
-
-    // Create globe icon (SVG)
-    button.innerHTML = `
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="#333">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.94-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-      </svg>
-    `;
-    button.style.border = 'none';
-    button.style.background = 'transparent';
-    button.style.cursor = 'pointer';
-    button.style.padding = '5px';
-    button.style.display = 'flex';
-    button.style.alignItems = 'center';
-    button.style.justifyContent = 'center';
-
-    button.addEventListener('click', this._onClickGlobe.bind(this));
-
-    this._container.appendChild(button);
-    return this._container;
-  }
-
-  onRemove(): void {
-    if (this._container && this._container.parentNode) {
-      this._container.parentNode.removeChild(this._container);
-    }
-  }
-
-  private _onClickGlobe(): void {
-    if (!this._availableBasemaps.length) return;
-
-    // Cycle to next basemap
-    const currentIndex = this._availableBasemaps.indexOf(this._currentBasemap);
-    const nextIndex = (currentIndex + 1) % this._availableBasemaps.length;
-    const nextBasemap = this._availableBasemaps[nextIndex];
-
-    this._currentBasemap = nextBasemap;
-    this._onBasemapChange(nextBasemap);
-  }
-
-  updateBasemap(basemap: string): void {
-    this._currentBasemap = basemap;
-  }
-}
 
 // Custom Export PDF Control class
 class ExportPDFControl implements IControl {
@@ -245,6 +177,7 @@ interface MapLibreMapProps {
   mapTree: MapTreeResponse | null;
   conversationId: number | null;
   conversations: Conversation[];
+  conversationsEnabled: boolean;
   setConversationId: (conversationId: number | null) => void;
   readyState: number;
   openDropzone?: () => void;
@@ -274,6 +207,7 @@ export default function MapLibreMap({
   mapTree,
   conversationId,
   conversations,
+  conversationsEnabled,
   setConversationId,
   readyState,
   openDropzone,
@@ -292,21 +226,40 @@ export default function MapLibreMap({
   invalidateProjectData,
   invalidateMapData,
 }: MapLibreMapProps) {
+  const queryClient = useQueryClient();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const localMapRef = useRef<MLMap | null>(null);
-  const globeControlRef = useRef<GlobeControl | null>(null);
+  const basemapControlRef = useRef<BasemapControl | null>(null);
   const exportPDFControlRef = useRef<ExportPDFControl | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
   const [hasZoomed, setHasZoomed] = useState(false);
   const [layerSymbols, setLayerSymbols] = useState<{
     [layerId: string]: JSX.Element;
   }>({});
-  const [currentBasemap, setCurrentBasemap] = useState<string>('');
-  const [availableBasemaps, setAvailableBasemaps] = useState<string[]>([]);
-  const [demoConfig, setDemoConfig] = useState<{
-    available: boolean;
-    description: string;
-  }>({ available: false, description: '' });
+  const { data: basemapsData } = useQuery({
+    queryKey: ['basemaps', 'available'],
+    queryFn: async () => {
+      const response = await fetch('/api/basemaps/available');
+      if (!response.ok) {
+        throw new Error('Failed to fetch basemaps');
+      }
+      return (await response.json()) as { styles: string[]; display_names?: Record<string, string> };
+    },
+  });
+  const availableBasemaps = basemapsData?.styles ?? [];
+  const basemapDisplayNames = basemapsData?.display_names ?? {};
+
+  const { data: demoConfigData } = useQuery({
+    queryKey: ['projects', 'config', 'demo-postgis-available'],
+    queryFn: async () => {
+      const response = await fetch('/api/projects/config/demo-postgis-available');
+      if (!response.ok) {
+        throw new Error('Failed to fetch demo config');
+      }
+      return (await response.json()) as { available: boolean; description: string };
+    },
+  });
+  const demoConfig = demoConfigData ?? { available: false, description: '' };
 
   const pointCloudLayers = useMemo(() => {
     const filtered = mapData?.layers?.filter((layer) => layer.type === 'point_cloud') ?? EMPTY_POINT_CLOUD_LAYERS;
@@ -396,17 +349,41 @@ export default function MapLibreMap({
     return layer;
   }, []);
 
-  const [pointerPosition, setPointerPosition] = useState<PointerPosition | null>(null);
-  const otherClientPositions = usePresence<PointerPosition | null>('cursors', pointerPosition);
   const [showAttributeTable, setShowAttributeTable] = useState(false);
   const [selectedLayer, setSelectedLayer] = useState<MapLayer | null>(null);
 
   const [isCancelling, setIsCancelling] = useState(false);
 
   // Function to handle basemap changes
-  const handleBasemapChange = useCallback(async (newBasemap: string) => {
-    setCurrentBasemap(newBasemap);
-  }, []);
+  const handleBasemapChange = useCallback(
+    async (newBasemap: string) => {
+      // Parse map ID from URL, but handle case where versionIdParam is optional
+      const pathParts = window.location.pathname.split('/');
+      const urlMapId = pathParts.length > 3 ? pathParts[3] : mapId; // Use mapId fallback if no version in URL
+
+      try {
+        const response = await fetch(`/api/maps/${urlMapId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ basemap: newBasemap }),
+        });
+
+        if (response.ok) {
+          // Invalidate style query to trigger immediate re-fetch with new basemap
+          await queryClient.invalidateQueries({
+            queryKey: ['mapStyle', urlMapId],
+          });
+        } else {
+          console.error('Failed to update basemap:', await response.text());
+        }
+      } catch (error) {
+        console.error('Error updating basemap:', error);
+      }
+    },
+    [queryClient, mapId],
+  );
 
   // Function to get the appropriate icon for an action
   const getActionIcon = (action: string) => {
@@ -617,25 +594,6 @@ export default function MapLibreMap({
   const pointsGeoJSON = useMemo(() => {
     const features: GeoJSON.Feature[] = [];
 
-    // Add real user pointer positions
-    Object.entries(otherClientPositions)
-      .filter(([, data]) => data !== null && data.value !== null && 'lng' in data.value && 'lat' in data.value)
-      .forEach(([id, data]) => {
-        const presenceData = data as unknown as PresenceData;
-        features.push({
-          type: 'Feature' as const,
-          geometry: {
-            type: 'Point' as const,
-            coordinates: [presenceData.value.lng, presenceData.value.lat],
-          },
-          properties: {
-            user: id,
-            abbrev: id.substring(0, 6),
-            color: '#' + id.substring(0, 6),
-          },
-        });
-      });
-
     // Add Kue's animated positions
     Object.entries(kuePositions).forEach(([actionId, position]) => {
       features.push({
@@ -652,7 +610,7 @@ export default function MapLibreMap({
       type: 'FeatureCollection' as const,
       features,
     };
-  }, [otherClientPositions, kuePositions]);
+  }, [kuePositions]);
 
   const loadLegendSymbols = useCallback(
     (map: MLMap) => {
@@ -757,14 +715,6 @@ export default function MapLibreMap({
 
         // Load cursor image initially
         loadCursorImage();
-      });
-
-      newMap.on('mousemove', (e) => {
-        const wrapped = e.lngLat.wrap();
-        setPointerPosition({
-          lng: wrapped.lng,
-          lat: wrapped.lat,
-        });
       });
 
       newMap.on('error', (e) => {
@@ -882,12 +832,9 @@ export default function MapLibreMap({
 
   // Use useQuery to fetch the style.json
   const { data: styleData } = useQuery({
-    queryKey: ['mapStyle', mapId, currentBasemap, styleUpdateCounter],
+    queryKey: ['mapStyle', mapId, styleUpdateCounter],
     queryFn: async () => {
       const url = new URL(`/api/maps/${mapId}/style.json`, window.location.origin);
-      if (currentBasemap) {
-        url.searchParams.set('basemap', currentBasemap);
-      }
       const response = await fetch(url.toString());
       if (!response.ok) {
         throw new Error(`Failed to fetch style: ${response.statusText}`);
@@ -896,6 +843,14 @@ export default function MapLibreMap({
     },
     enabled: !!mapId, // Only run query when mapId is available
   });
+
+  // Get current basemap from style metadata or default to first available
+  const currentBasemap = useMemo(() => {
+    if (styleData?.metadata?.current_basemap) {
+      return styleData.metadata.current_basemap;
+    }
+    return availableBasemaps[0] || '';
+  }, [styleData, availableBasemaps]);
 
   // Separate effect to handle style updates when styleData changes
   useEffect(() => {
@@ -955,7 +910,6 @@ export default function MapLibreMap({
     }
   }, [pointsGeoJSON]);
 
-  const status = useConnectionStatus();
   const [inputValue, setInputValue] = useState('');
   const readyStateRef = useRef<number>(readyState);
 
@@ -1077,58 +1031,34 @@ export default function MapLibreMap({
     }
   };
 
-  // Fetch available basemaps on component mount
-  useEffect(() => {
-    const fetchAvailableBasemaps = async () => {
-      try {
-        const response = await fetch('/api/basemaps/available');
-        if (response.ok) {
-          const data = await response.json();
-          setAvailableBasemaps(data.styles);
-        }
-      } catch (error) {
-        console.error('Error fetching available basemaps:', error);
-      }
-    };
-
-    fetchAvailableBasemaps();
-  }, []);
-
-  // Fetch demo config on component mount
-  useEffect(() => {
-    const fetchDemoConfig = async () => {
-      try {
-        const response = await fetch('/api/projects/config/demo-postgis-available');
-        if (response.ok) {
-          const data = await response.json();
-          setDemoConfig(data);
-        }
-      } catch (error) {
-        console.error('Error fetching demo config:', error);
-      }
-    };
-
-    fetchDemoConfig();
-  }, []);
-
-  // Add globe control when map and basemaps are available
+  // Add basemap control when map and basemaps are available
   useEffect(() => {
     const map = localMapRef.current;
-    if (map && availableBasemaps.length > 0 && !globeControlRef.current) {
-      // Use first available basemap as the initial display value
+    if (map && availableBasemaps.length > 0 && !basemapControlRef.current) {
+      // Use current basemap from style or default to first available
       const initialBasemap = currentBasemap || availableBasemaps[0];
-      const globeControl = new GlobeControl(availableBasemaps, initialBasemap, handleBasemapChange);
-      globeControlRef.current = globeControl;
-      map.addControl(globeControl);
+      // Create control with a no-op callback initially to avoid dependency issues
+      const basemapControl = new BasemapControl(availableBasemaps, initialBasemap, basemapDisplayNames, () => undefined);
+      basemapControlRef.current = basemapControl;
+      map.addControl(basemapControl, 'top-right');
+      // Immediately update with the real callback
+      basemapControl.updateCallback(handleBasemapChange);
     }
-  }, [availableBasemaps, currentBasemap, handleBasemapChange]);
+  }, [availableBasemaps, currentBasemap, basemapDisplayNames, handleBasemapChange]);
 
-  // Update globe control when basemap changes
+  // Update basemap control when basemap changes
   useEffect(() => {
-    if (globeControlRef.current && currentBasemap) {
-      globeControlRef.current.updateBasemap(currentBasemap);
+    if (basemapControlRef.current && currentBasemap) {
+      basemapControlRef.current.updateBasemap(currentBasemap);
     }
   }, [currentBasemap]);
+
+  // Update basemap control callback when handleBasemapChange changes
+  useEffect(() => {
+    if (basemapControlRef.current) {
+      basemapControlRef.current.updateCallback(handleBasemapChange);
+    }
+  }, [handleBasemapChange]);
 
   // Effect to log when attribute table is opened/closed
   useEffect(() => {
@@ -1179,7 +1109,6 @@ export default function MapLibreMap({
             isInConversation={conversationId !== null}
             readyState={readyState}
             activeActions={activeActions}
-            driftDbConnected={status.connected}
             setShowAttributeTable={setShowAttributeTable}
             setSelectedLayer={setSelectedLayer}
             updateMapData={invalidateMapData}
@@ -1344,6 +1273,7 @@ export default function MapLibreMap({
         conversationId={conversationId}
         currentMapId={mapId}
         conversations={conversations}
+        conversationsEnabled={conversationsEnabled}
         setConversationId={setConversationId}
         activeActions={activeActions}
       />

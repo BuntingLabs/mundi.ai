@@ -32,3 +32,22 @@ jobs:
       - name: Run Biome
         run: biome ci --error-on-warnings
         working-directory: frontendts/
+
+  basedpyright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install deps with uv
+        run: uv sync --dev
+
+      - name: Run basedpyright from project env
+        run: uv run basedpyright

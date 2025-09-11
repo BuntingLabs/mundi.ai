@@ -4,8 +4,6 @@ import { ChatCompletionUserMessageParam } from 'openai/resources/chat/completion
 
 export interface MapProject {
   id: string;
-  owner_uuid: string;
-  link_accessible: boolean;
   title?: string;
   maps: string[];
   created_on: string;
@@ -14,12 +12,12 @@ export interface MapProject {
     description?: string;
     last_edited?: string;
   };
-  postgres_connections?: PostgresConnectionDetails[];
   soft_deleted_at?: string;
 }
 
 export type ProjectState = { type: 'not_logged_in' } | { type: 'loading' } | { type: 'loaded'; projects: MapProject[] };
 
+// Keep this in sync with backend LayerMetadata (mundi-public/src/routes/postgres_routes.py)
 export interface MapLayerMetadata {
   original_filename?: string;
   original_format?: string;
@@ -36,8 +34,6 @@ export interface MapLayerMetadata {
     lat: number;
   };
   pointcloud_z_range?: [number, number];
-  pmtiles_key?: string;
-  cog_key?: string;
 }
 
 export interface MapLayer {
@@ -71,27 +67,9 @@ export interface MapData {
     map_state: string;
     last_edited: string;
   }>;
-  display_as_diff: boolean;
-  diff?: MapDiff;
 }
 
-export interface LayerDiff {
-  layer_id: string;
-  name: string;
-  status: string; // 'added', 'removed', 'edited', 'existing'
-  changes?: {
-    [key: string]: {
-      old: string | object | null;
-      new: string | object | null;
-    };
-  };
-}
-
-export interface MapDiff {
-  prev_map_id?: string;
-  new_map_id: string;
-  layer_diffs: LayerDiff[];
-}
+// Note: Per-layer diffs for the map detail route have been removed.
 
 export interface PointerPosition {
   lng: number;

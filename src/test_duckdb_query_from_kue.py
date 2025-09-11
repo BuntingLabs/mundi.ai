@@ -41,13 +41,12 @@ class MockResponse:
 
 @pytest.fixture
 def sync_test_map_with_vector_layers(sync_auth_client):
-    project_payload = {"layers": []}
-    map_create_payload = {
-        "project": project_payload,
-        "title": "Geoprocessing Test Map",
-        "description": "Test map for geoprocessing operations with vector layers",
-    }
-    map_response = sync_auth_client.post("/api/maps/create", json=map_create_payload)
+    map_response = sync_auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Geoprocessing Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     data = map_response.json()
     map_id = data["id"]

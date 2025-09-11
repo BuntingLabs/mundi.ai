@@ -75,6 +75,8 @@ async def create_conversation(
             user_id,
             "title pending",
         )
+        if conversation is None:
+            raise HTTPException(500, "Failed to create conversation")
 
         return ConversationResponse(
             id=conversation["id"],

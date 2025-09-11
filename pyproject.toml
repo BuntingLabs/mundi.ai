@@ -1,0 +1,45 @@
+[project]
+name = "mundi.ai"
+version = "0.0.1"
+description = "Mundi.ai is an open source web GIS"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aioboto3==14.3.0",
+    "aiohttp==3.11.18",
+    "alembic==1.16.2",
+    "asyncpg==0.30.0",
+    "boto3==1.37.3",
+    "fastapi==0.115.12",
+    "fiona==1.10.1",
+    "httpx==0.28.1",
+    "httpx-ws==0.7.2",
+    "laspy==2.6.1",
+    "numpy==2.3.1",
+    "openai==1.78.1",
+    "opentelemetry-api==1.36.0",
+    "opentelemetry-sdk==1.36.0",
+    "pillow==9.4.0",
+    "pydantic==2.11.4",
+    "pyproj==3.4.1",
+    "pytest==8.3.5",
+    "redis==6.1.0",
+    "sqlalchemy==2.0.41",
+]
+
+[tool.basedpyright]
+include = ["src"]
+
+exclude = ["**/__pycache__", "**/.venv", "**/.mypy_cache", "**/.ruff_cache", "**/build", "**/dist"]
+
+pythonVersion = "3.11"
+
+baselineFile = ".basedpyright/baseline.json"
+
+# can tighten later to "recommended"
+typeCheckingMode = "standard"
+
+[dependency-groups]
+dev = [
+    "basedpyright",
+]

@@ -20,13 +20,12 @@ from pathlib import Path
 
 @pytest.fixture(scope="session")
 async def test_map_with_airports_layer(auth_client):
-    map_payload = {
-        "project": {"layers": [], "crs": {"epsg_code": 3857}},
-        "title": "Attribute Table Test Map",
-        "description": "Test map for attribute table operations",
-    }
-
-    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    map_response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Attribute Table Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
 
@@ -54,13 +53,12 @@ async def test_map_with_airports_layer(auth_client):
 
 @pytest.fixture(scope="session")
 async def test_map_with_counties_layer(auth_client):
-    map_payload = {
-        "project": {"layers": [], "crs": {"epsg_code": 3857}},
-        "title": "Counties Attribute Table Test Map",
-        "description": "Test map for attribute table pagination",
-    }
-
-    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    map_response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Counties Attribute Table Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
 

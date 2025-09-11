@@ -112,6 +112,19 @@ the rest of the internet).
 
 ## Best practices and errors
 
+### Whitelist Mundi egress IP addresses
+
+Mundi will always connect to your Postgres from the below IP addresses. By whitelisting them while rejecting other connections, you'll increase the security of your database.
+
+Allow on TCP 5432: `34.44.109.93/32`, `34.27.218.71/32` (both). The `/32` means a single IP address.
+
+**Docs by host**
+- **AWS RDS/Aurora (Postgres):** [Security groups](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.RDSSecurityGroups.html).
+- **GCP Cloud SQL (Postgres):** ["Authorized networks"](https://cloud.google.com/sql/docs/postgres/authorize-networks).
+- **Azure Database for PostgreSQL (Flexible Server):** [Firewall rules](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/security-firewall-rules).
+- **DigitalOcean Managed PostgreSQL:** [Trusted Sources](https://docs.digitalocean.com/products/databases/postgresql/how-to/secure/).
+- **Self-hosted Postgres:** [pg_hba.conf](https://www.postgresql.org/docs/current/auth-pg-hba-conf.html).
+
 ### Creating a read-only user for Mundi
 
 We recommend that users create read-only database users for Mundi to use. This read-only user should only
@@ -169,6 +182,26 @@ If the connection times out (Mundi defaults to 10 second limit), it's likely tha
 is not accessible from the internet, either due to a firewall or the database is on your local
 network. In order to be accessible, the database must be pinned to a public static IPv4 address
 allowing ingress and egress traffic.
+
+#### SSL connection rejected
+
+If your Postgres database doesn't have SSL configured correctly, by default Mundi
+will give you an error when connecting to it:
+
+```
+ConnectionError: PostgreSQL server at "..." rejected SSL upgrade
+```
+
+**Option 1: Enable SSL:** Enable SSL connections on your PostgreSQL server. This involves
+editing `pg_hba.conf`. Either ask your database administrator, or follow a
+tutorial online.
+
+**Option 2: Disable SSL (insecure)**: Instructs Mundi to not encrypt data when connecting. Add `?sslmode=disable` to your connection string. This will make the connection work, but result in data
+from your database being sent unencrypted through the Internet:
+
+```
+postgresql://user:pass@hostname:5432/db?sslmode=disable
+```
 
 ## Row Level Security (RLS)
 

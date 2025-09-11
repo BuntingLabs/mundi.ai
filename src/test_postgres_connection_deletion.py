@@ -41,20 +41,12 @@ async def test_soft_delete_postgis_connection_as_owner(auth_client):
     )
     assert add_response.status_code == 200
 
-    # Get connection ID from project details
-    projects_response = await auth_client.get("/api/projects/?limit=10000")
-    assert projects_response.status_code == 200
-    projects_data = projects_response.json()
-
-    test_project = None
-    for project in projects_data["projects"]:
-        if project["id"] == project_id:
-            test_project = project
-            break
-
-    assert test_project is not None
-    assert len(test_project["postgres_connections"]) == 1
-    connection_id = test_project["postgres_connections"][0]["connection_id"]
+    # Get connection ID from project sources
+    sources_response = await auth_client.get(f"/api/projects/{project_id}/sources")
+    assert sources_response.status_code == 200
+    sources = sources_response.json()
+    assert len(sources) == 1
+    connection_id = sources[0]["connection_id"]
 
     # Soft delete the connection
     delete_response = await auth_client.delete(
@@ -65,19 +57,13 @@ async def test_soft_delete_postgis_connection_as_owner(auth_client):
     assert delete_data["success"] is True
     assert "deleted successfully" in delete_data["message"]
 
-    # Verify connection no longer appears in project connections
-    projects_response_after = await auth_client.get("/api/projects/?limit=10000")
-    assert projects_response_after.status_code == 200
-    projects_data_after = projects_response_after.json()
-
-    test_project_after = None
-    for project in projects_data_after["projects"]:
-        if project["id"] == project_id:
-            test_project_after = project
-            break
-
-    assert test_project_after is not None
-    assert len(test_project_after["postgres_connections"]) == 0
+    # Verify connection no longer appears in project sources
+    sources_response_after = await auth_client.get(
+        f"/api/projects/{project_id}/sources"
+    )
+    assert sources_response_after.status_code == 200
+    sources_after = sources_response_after.json()
+    assert len(sources_after) == 0
 
 
 @pytest.mark.anyio
@@ -130,20 +116,12 @@ async def test_soft_delete_already_deleted_connection(auth_client):
     )
     assert add_response.status_code == 200
 
-    # Get connection ID
-    projects_response = await auth_client.get("/api/projects/?limit=10000")
-    assert projects_response.status_code == 200
-    projects_data = projects_response.json()
-
-    test_project = None
-    for project in projects_data["projects"]:
-        if project["id"] == project_id:
-            test_project = project
-            break
-
-    assert test_project is not None
-    assert len(test_project["postgres_connections"]) == 1
-    connection_id = test_project["postgres_connections"][0]["connection_id"]
+    # Get connection ID from project sources
+    sources_response = await auth_client.get(f"/api/projects/{project_id}/sources")
+    assert sources_response.status_code == 200
+    sources = sources_response.json()
+    assert len(sources) == 1
+    connection_id = sources[0]["connection_id"]
 
     # First deletion should succeed
     delete_response_1 = await auth_client.delete(
@@ -210,39 +188,25 @@ async def test_soft_deleted_connection_not_listed(auth_client):
     assert add_response_2.status_code == 200
 
     # Verify both connections are listed
-    projects_response = await auth_client.get("/api/projects/?limit=10000")
-    assert projects_response.status_code == 200
-    projects_data = projects_response.json()
-
-    test_project = None
-    for project in projects_data["projects"]:
-        if project["id"] == project_id:
-            test_project = project
-            break
-
-    assert test_project is not None
-    assert len(test_project["postgres_connections"]) == 2
+    sources_response = await auth_client.get(f"/api/projects/{project_id}/sources")
+    assert sources_response.status_code == 200
+    sources = sources_response.json()
+    assert len(sources) == 2
 
     # Get first connection ID and delete it
-    connection_id_1 = test_project["postgres_connections"][0]["connection_id"]
+    connection_id_1 = sources[0]["connection_id"]
     delete_response = await auth_client.delete(
         f"/api/projects/{project_id}/postgis-connections/{connection_id_1}"
     )
     assert delete_response.status_code == 200
 
     # Verify only one connection is now listed
-    projects_response_after = await auth_client.get("/api/projects/?limit=10000")
-    assert projects_response_after.status_code == 200
-    projects_data_after = projects_response_after.json()
-
-    test_project_after = None
-    for project in projects_data_after["projects"]:
-        if project["id"] == project_id:
-            test_project_after = project
-            break
-
-    assert test_project_after is not None
-    assert len(test_project_after["postgres_connections"]) == 1
+    sources_response_after = await auth_client.get(
+        f"/api/projects/{project_id}/sources"
+    )
+    assert sources_response_after.status_code == 200
+    sources_after = sources_response_after.json()
+    assert len(sources_after) == 1
     # Verify the remaining connection is the second one
-    remaining_connection = test_project_after["postgres_connections"][0]
+    remaining_connection = sources_after[0]
     assert remaining_connection["friendly_name"] == "Connection 2"

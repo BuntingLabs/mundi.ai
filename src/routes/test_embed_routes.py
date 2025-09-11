@@ -69,7 +69,9 @@ async def test_embed_route_with_invalid_origin(auth_client, test_project_with_ma
 
 
 @pytest.mark.anyio
-async def test_embed_route_with_valid_origin(auth_client, test_project_with_multiple_origins):
+async def test_embed_route_with_valid_origin(
+    auth_client, test_project_with_multiple_origins
+):
     project_id = test_project_with_multiple_origins["project_id"]
 
     with patch.dict(
@@ -107,12 +109,12 @@ async def test_embed_route_with_valid_origin(auth_client, test_project_with_mult
 
 
 @pytest.mark.anyio
-async def test_embed_route_with_valid_referer(auth_client, test_project_with_multiple_origins):
+async def test_embed_route_with_valid_referer(
+    auth_client, test_project_with_multiple_origins
+):
     project_id = test_project_with_multiple_origins["project_id"]
 
-    with patch.dict(
-        os.environ, {"MUNDI_EMBED_ALLOWED_ORIGINS": "https://site1.com"}
-    ):
+    with patch.dict(os.environ, {"MUNDI_EMBED_ALLOWED_ORIGINS": "https://site1.com"}):
         response = await auth_client.get(
             f"/api/projects/embed/v1/{project_id}.html",
             headers={"referer": "https://site1.com/guides/embedding-maps"},

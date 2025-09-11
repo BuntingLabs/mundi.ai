@@ -22,7 +22,10 @@ from typing import List
 from fastapi import UploadFile
 from io import BytesIO
 from src.dependencies.session import UserContext
-from src.routes.postgres_routes import internal_upload_layer
+from src.routes.postgres_routes import (
+    internal_upload_layer,
+    InternalLayerUploadResponse,
+)
 from src.structures import async_conn
 
 
@@ -140,13 +143,15 @@ async def download_from_openstreetmap(
                             filename=f"osm_{geom['name']}.gpkg", file=BytesIO(f.read())
                         )
 
-                    layer_response = await internal_upload_layer(
-                        map_id=map_id,
-                        file=upload_file,
-                        layer_name=f"{new_layer_name}_{geom['name']}",
-                        add_layer_to_map=False,
-                        user_id=user_id,
-                        project_id=project_id,
+                    layer_response: InternalLayerUploadResponse = (
+                        await internal_upload_layer(
+                            map_id=map_id,
+                            file=upload_file,
+                            layer_name=f"{new_layer_name}_{geom['name']}",
+                            add_layer_to_map=False,
+                            user_id=user_id,
+                            project_id=project_id,
+                        )
                     )
 
                     uploaded_layers.append(

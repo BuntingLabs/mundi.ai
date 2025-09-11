@@ -26,14 +26,14 @@ file format for the visualization engine ([Deck.gl](https://deck.gl/) and [MapLi
 
 ### Format, version, and size requirements
 
-- **File size**: Mundi cloud currently supports up to **100MB** point cloud files (`.laz` files are smaller than `.las` files)
+- **File size**: Mundi cloud currently supports up to **500MB** point cloud files (`.laz` files are smaller than `.las` files)
   due to the shared cloud environment. We'll be raising the limit in the future.
 - **LASer version**: [LASer formats 1.0, 1.1, 1.2, 1.3, and 1.4](https://en.wikipedia.org/wiki/LAS_file_format)
   should all be supported, and we automatically convert the file to 1.3.
 - **CRS**: LiDAR data must be annotated with a CRS present in PROJ and it will be automatically converted to `EPSG:4326`.
 
 :::note
-The 100MB file size limit is temporary, but you can still effectively visualize large point clouds by downsampling them.
+The 500MB file size limit is temporary, but you can still effectively visualize large point clouds by downsampling them.
 You can use the [lastools](https://lastools.github.io/) `las2las` utility or PDAL to downsample the point cloud before
 uploading it.
 

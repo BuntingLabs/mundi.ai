@@ -38,15 +38,13 @@ class MockResponse:
 def test_map_fixture(sync_auth_client):
     map_title = f"Test WebSocket Map {uuid.uuid4()}"
 
-    project_payload = {"layers": []}
-    map_create_payload = {
-        "project": project_payload,
-        "title": map_title,
-        "description": "Map for testing WebSocket functionality",
-        "link_accessible": True,
-    }
-
-    response = sync_auth_client.post("/api/maps/create", json=map_create_payload)
+    response = sync_auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": map_title,
+            "link_accessible": True,
+        },
+    )
     assert response.status_code == 200
     data = response.json()
     return {"map_id": data["id"], "project_id": data["project_id"]}

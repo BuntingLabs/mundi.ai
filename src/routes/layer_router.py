@@ -24,12 +24,12 @@ from fastapi import (
     Request,
     Depends,
 )
-from fastapi.responses import StreamingResponse, Response
-from ..dependencies.db_pool import get_pooled_connection
-from ..dependencies.dag import get_layer
+from fastapi.responses import StreamingResponse, Response, RedirectResponse
+from src.dependencies.db_pool import get_pooled_connection
+from src.dependencies.dag import get_layer
 from pydantic import BaseModel, Field
 from src.database.models import MapLayer
-from ..dependencies.session import (
+from src.dependencies.session import (
     verify_session_required,
     session_user_id,
     UserContext,
@@ -47,7 +47,7 @@ from src.utils import (
 import subprocess
 from src.structures import get_async_db_connection, async_conn
 from src.postgis_tiles import fetch_mvt_tile
-from ..dependencies.layer_describer import LayerDescriber, get_layer_describer
+from src.dependencies.layer_describer import LayerDescriber, get_layer_describer
 from opentelemetry import trace
 from src.dependencies.base_map import get_base_map_provider
 from src.utils import generate_id
@@ -76,7 +76,6 @@ layer_router = APIRouter()
 async def get_layer_cog_tif(
     request: Request,
     layer: MapLayer = Depends(get_layer),
-    session: UserContext = Depends(verify_session_required),
 ):
     # Check if layer is a raster type
     if layer.type != "raster":
@@ -85,28 +84,10 @@ async def get_layer_cog_tif(
             detail="Layer is not a raster type. COG can only be generated from raster data.",
         )
 
+    if layer.remote_url and layer.remote_url.endswith(".tif"):
+        return RedirectResponse(url=layer.remote_url, status_code=302)
+
     async with get_async_db_connection() as conn:
-        # Check if layer is associated with any maps via the layers array
-        map_result = await conn.fetchrow(
-            """
-            SELECT m.id, p.link_accessible, m.owner_uuid
-            FROM user_mundiai_maps m
-            JOIN user_mundiai_projects p ON m.project_id = p.id
-            WHERE $1 = ANY(m.layers) AND m.soft_deleted_at IS NULL
-            """,
-            layer.layer_id,
-        )
-
-        if map_result and not map_result["link_accessible"]:
-            # If not publicly accessible, verify that we have auth
-            if session.get_user_id() != str(map_result["owner_uuid"]):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Authentication required",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-
-        # Continue with the same implementation as the map-scoped endpoint
         bucket_name = get_bucket_name()
 
         # Check if metadata has cog_key
@@ -115,170 +96,197 @@ async def get_layer_cog_tif(
         # Set up MinIO/S3 client
         s3_client = await get_async_s3_client()
 
-        # If COG doesn't exist, create it
         if not cog_key:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Download the raster file
-                s3_key = layer.s3_key
-                file_extension = os.path.splitext(s3_key)[1]
-                local_input_file = os.path.join(
-                    temp_dir, f"layer_{layer.layer_id}{file_extension}"
+            lock_key = f"lock:cog:{layer.layer_id}"
+            lock = redis.lock(lock_key, timeout=600, blocking_timeout=30)
+            acquired = lock.acquire(blocking=True)
+            if not acquired:
+                raise HTTPException(
+                    status_code=423,
+                    detail="COG generation in progress. Try again later.",
                 )
-
-                # Download from S3 using async client
-                s3 = await get_async_s3_client()
-                await s3.download_file(bucket_name, s3_key, local_input_file)
-                # Create COG file path
-                local_cog_file = os.path.join(
-                    temp_dir, f"layer_{layer.layer_id}.cog.tif"
-                )
-
-                # Check raster info (needed for band count)
-                gdalinfo_cmd = ["gdalinfo", "-json", local_input_file]
-                try:
-                    gdalinfo_result = subprocess.run(
-                        gdalinfo_cmd, check=True, capture_output=True, text=True
-                    )
-                    gdalinfo_json = json.loads(gdalinfo_result.stdout)
-                except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-                    logger.error(
-                        f"Failed to get gdalinfo for {layer.layer_id}: {e}",
-                        exc_info=True,
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to process raster info for layer {layer.layer_id}.",
-                    )
-
-                # Always attempt reprojection to EPSG:3857 (gdalwarp is a no-op if already in 3857)
-                reprojected_file_path = os.path.join(
-                    temp_dir, f"layer_{layer.layer_id}_3857.tif"
-                )
-                gdalwarp_cmd = [
-                    "gdalwarp",
-                    "-t_srs",
-                    "EPSG:3857",
-                    "-r",
-                    "bilinear",  # resampling method
-                    local_input_file,
-                    reprojected_file_path,
-                ]
-                try:
-                    print(
-                        f"INFO: Running gdalwarp for layer {layer.layer_id} to EPSG:3857."
-                    )
-                    subprocess.run(
-                        gdalwarp_cmd, check=True, capture_output=True, text=True
-                    )
-                    input_file_for_cog = reprojected_file_path
-                    print(
-                        f"INFO: Layer {layer.layer_id} successfully processed/reprojected to EPSG:3857."
-                    )
-                except subprocess.CalledProcessError as e:
-                    print(
-                        f"ERROR: gdalwarp failed for layer {layer.layer_id}: {e.stderr}. Using original file for COG creation."
-                    )
-                    # Fallback to original file if reprojection fails
-                    input_file_for_cog = local_input_file
-
-                # Get band count from the original gdalinfo output
-                num_bands = len(gdalinfo_json.get("bands", []))
-                needs_color_ramp_suffix = False
-
-                if num_bands == 1:
-                    try:
-                        # Try expanding to RGB first
-                        local_rgb_file = os.path.join(
-                            temp_dir, f"layer_{layer.layer_id}_rgb.tif"
-                        )
-                        rgb_cmd = [
-                            "gdal_translate",
-                            "-of",
-                            "GTiff",
-                            "-expand",
-                            "rgb",
-                            local_input_file,
-                            local_rgb_file,
-                        ]
-                        subprocess.run(
-                            rgb_cmd, check=True, capture_output=True, text=True
-                        )
-                        input_file_for_cog = local_rgb_file
-                        print(
-                            f"INFO: Expanded single band to RGB for layer {layer.layer_id}"
-                        )
-                    except subprocess.CalledProcessError as e:
-                        print(
-                            f"WARN: gdal_translate -expand rgb failed for layer {layer.layer_id}: {e.stderr}. Using single-band with color ramp."
-                        )
-                        # Use the existing raster_value_stats_b1 from metadata
-                        if "raster_value_stats_b1" in layer.metadata_dict:
-                            needs_color_ramp_suffix = True
-                            print(
-                                f"INFO: Using existing raster_value_stats_b1 for layer {layer.layer_id}"
-                            )
-                        # Keep input_file_for_cog as the original single-band file
-
-                # Convert to Cloud Optimized GeoTIFF
-                cog_cmd_base = [
-                    "gdal_translate",
-                    "-of",
-                    "COG",
-                    "-co",
-                    "BLOCKSIZE=256",
-                ]
-                if needs_color_ramp_suffix:
-                    cog_cmd_base.extend(["-ot", "Float32"])
-                    cog_cmd_compression = ["-co", "COMPRESS=LZW"]
-                else:
-                    cog_cmd_compression = ["-co", "COMPRESS=JPEG", "-co", "QUALITY=85"]
-
-                cog_cmd = (
-                    cog_cmd_base
-                    + cog_cmd_compression
-                    + [
-                        "-co",
-                        "OVERVIEWS=AUTO",
-                        input_file_for_cog,
-                        local_cog_file,
-                    ]
-                )
-
-                try:
-                    subprocess.run(cog_cmd, check=True, capture_output=True, text=True)
-                except subprocess.CalledProcessError as e:
-                    error_detail = f"COG generation failed. Command: {' '.join(e.cmd)}\nStderr: {e.stderr}\nStdout: {e.stdout}"
-                    print(f"ERROR: {error_detail}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"COG generation failed: {e.stderr or 'Unknown GDAL error'}",
-                    )
-
-                # Upload the COG file to S3
-                cog_key = f"cog/layer/{layer.layer_id}.cog.tif"
-                s3 = await get_async_s3_client()
-                await s3.upload_file(local_cog_file, bucket_name, cog_key)
-                print(f"INFO: Uploaded COG to s3://{bucket_name}/{cog_key}")
-
-                # Update the layer metadata with the COG key
-                metadata = layer.metadata_dict
-                metadata["cog_key"] = cog_key
-
-                # Update the database
-                await conn.execute(
-                    """
-                    UPDATE map_layers
-                    SET metadata = $1
-                    WHERE layer_id = $2
-                    """,
-                    json.dumps(metadata),
+            try:
+                row = await conn.fetchrow(
+                    "SELECT metadata FROM map_layers WHERE layer_id = $1",
                     layer.layer_id,
                 )
-                print(f"INFO: Updated metadata for layer {layer.layer_id}", metadata)
+                if (
+                    row
+                    and isinstance(row["metadata"], dict)
+                    and row["metadata"].get("cog_key")
+                ):
+                    cog_key = row["metadata"]["cog_key"]
+                else:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        # Download the raster file
+                        s3_key: str = str(layer.s3_key or "")
+                        file_extension = os.path.splitext(s3_key)[1] if s3_key else ""
+                        local_input_file = os.path.join(
+                            temp_dir, f"layer_{layer.layer_id}{file_extension}"
+                        )
+
+                        # Download from S3 using async client
+                        s3 = await get_async_s3_client()
+                        await s3.download_file(bucket_name, s3_key, local_input_file)
+                        # Create COG file path
+                        local_cog_file = os.path.join(
+                            temp_dir, f"layer_{layer.layer_id}.cog.tif"
+                        )
+
+                        # Helper to run commands asynchronously with timeout
+                        async def run_cmd(
+                            cmd: list[str], timeout_seconds: int = 30
+                        ) -> str:
+                            proc = await asyncio.create_subprocess_exec(
+                                *cmd,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            try:
+                                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                                    proc.communicate(), timeout=timeout_seconds
+                                )
+                            except asyncio.TimeoutError:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                                raise HTTPException(
+                                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                                    detail=f"Command timed out after {timeout_seconds}s: {' '.join(cmd)}",
+                                )
+                            if (proc.returncode or 0) != 0:
+                                stderr_text = (stderr_bytes or b"").decode(
+                                    "utf-8", "ignore"
+                                )
+                                raise subprocess.CalledProcessError(
+                                    returncode=int(proc.returncode or 1),
+                                    cmd=cmd,
+                                    output=stdout_bytes,
+                                    stderr=stderr_text,
+                                )
+                            return (stdout_bytes or b"").decode("utf-8", "ignore")
+
+                        gdalinfo_cmd = ["gdalinfo", "-json", local_input_file]
+                        try:
+                            gdalinfo_out = await run_cmd(
+                                gdalinfo_cmd, timeout_seconds=30
+                            )
+                            gdalinfo_json = json.loads(gdalinfo_out)
+                        except (subprocess.CalledProcessError, json.JSONDecodeError):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Failed to process raster info for layer {layer.layer_id}.",
+                            )
+
+                        # Default input for downstream steps
+                        input_file_for_cog = local_input_file
+
+                        # Get band count from the original gdalinfo output
+                        num_bands = len(gdalinfo_json.get("bands", []))
+                        needs_color_ramp_suffix = False
+
+                        if num_bands == 1:
+                            try:
+                                # Try expanding to RGB first
+                                local_rgb_file = os.path.join(
+                                    temp_dir, f"layer_{layer.layer_id}_rgb.tif"
+                                )
+                                rgb_cmd = [
+                                    "gdal_translate",
+                                    "-of",
+                                    "GTiff",
+                                    "-expand",
+                                    "rgb",
+                                    local_input_file,
+                                    local_rgb_file,
+                                ]
+                                await run_cmd(rgb_cmd)
+                                input_file_for_cog = local_rgb_file
+                            except subprocess.CalledProcessError:
+                                # Use the existing raster_value_stats_b1 from metadata
+                                meta = layer.metadata_dict or {}
+                                if (
+                                    isinstance(meta, dict)
+                                    and "raster_value_stats_b1" in meta
+                                ):
+                                    needs_color_ramp_suffix = True
+                                # Keep input_file_for_cog as the original single-band file
+
+                        # Combine reprojection and COG creation in a single gdalwarp call
+                        # gdalwarp will reproject to EPSG:3857 and write COG directly
+                        warp_cmd_base = [
+                            "gdalwarp",
+                            "-t_srs",
+                            "EPSG:3857",
+                            "-r",
+                            "bilinear",
+                            "-of",
+                            "COG",
+                            "-co",
+                            "BLOCKSIZE=256",
+                        ]
+                        if needs_color_ramp_suffix:
+                            warp_cmd_base.extend(["-ot", "Float32"])
+                            warp_compress = ["-co", "COMPRESS=LZW"]
+                        else:
+                            warp_compress = [
+                                "-co",
+                                "COMPRESS=JPEG",
+                                "-co",
+                                "QUALITY=85",
+                            ]
+
+                        warp_cmd = (
+                            warp_cmd_base
+                            + warp_compress
+                            + [
+                                "-co",
+                                "OVERVIEWS=AUTO",
+                                input_file_for_cog,
+                                local_cog_file,
+                            ]
+                        )
+
+                        try:
+                            await run_cmd(warp_cmd)
+                        except subprocess.CalledProcessError:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="COG generation failed",
+                            )
+
+                        # Upload the COG file to S3
+                        cog_key = f"cog/layer/{layer.layer_id}.cog.tif"
+                        s3 = await get_async_s3_client()
+                        await s3.upload_file(local_cog_file, bucket_name, cog_key)
+
+                        # Update the layer metadata with the COG key
+                        metadata = layer.metadata_dict or {}
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                        metadata["cog_key"] = cog_key
+
+                        # Update the database
+                        await conn.execute(
+                            """
+                            UPDATE map_layers
+                            SET metadata = $1
+                            WHERE layer_id = $2
+                            """,
+                            json.dumps(metadata),
+                            layer.layer_id,
+                        )
+            finally:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
 
         # Ensure cog_key is available if it was just generated
         if not cog_key:
-            cog_key = layer.metadata_dict.get("cog_key")
+            _meta = layer.metadata_dict or {}
+            cog_key = _meta.get("cog_key") if isinstance(_meta, dict) else None
             if not cog_key:
                 # This case should ideally not be reached if generation logic is sound
                 raise HTTPException(
@@ -376,6 +384,9 @@ async def get_layer_pmtiles(
             detail="Layer is not a vector type. PMTiles can only be generated from vector data.",
         )
 
+    if layer.remote_url and layer.remote_url.endswith(".pmtiles"):
+        return RedirectResponse(url=layer.remote_url, status_code=302)
+
     # Set up S3 client and bucket
     bucket_name = get_bucket_name()
 
@@ -464,17 +475,11 @@ async def get_layer_pmtiles(
 async def get_layer_laz(
     request: Request,
     layer: MapLayer = Depends(get_layer),
-    session: UserContext = Depends(verify_session_required),
 ):
     if layer.type != "point_cloud":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Layer is not a point cloud type",
-        )
-
-    if session.get_user_id() != str(layer.owner_uuid):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found"
         )
 
     # Set up S3 client and bucket
@@ -568,7 +573,6 @@ async def get_layer_mvt_tile(
     y: int,
     request: Request,
     layer: MapLayer = Depends(get_layer),
-    session: UserContext = Depends(verify_session_required),
 ):
     # Validate tile coordinates
     if z < 0 or z > 18 or x < 0 or y < 0 or x >= (1 << z) or y >= (1 << z):
@@ -576,15 +580,14 @@ async def get_layer_mvt_tile(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tile coordinates"
         )
     async with async_conn("mvt") as conn:
-        # Get PostGIS connection details and verify ownership
+        # Get PostGIS connection details (authorization handled by get_layer)
         connection_details = await conn.fetchrow(
             """
-            SELECT user_id, connection_uri
+            SELECT connection_uri
             FROM project_postgres_connections
-            WHERE id = $1 AND user_id = $2
+            WHERE id = $1 AND soft_deleted_at IS NULL
             """,
             layer.postgis_connection_id,
-            session.get_user_id(),
         )
 
         if not connection_details:
@@ -681,13 +684,6 @@ async def get_layer_geojson(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Layer is not a vector type. GeoJSON format is only available for vector data.",
-        )
-
-    # Handle remote URLs and S3 storage uniformly, but keep PostGIS separate
-    if layer.type == "postgis":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="PostGIS layers not yet supported for GeoJSON export.",
         )
 
     # Get unified OGR source (works for S3 and remote URLs)
@@ -928,4 +924,62 @@ async def set_layer_style(
     return SetStyleResponse(
         style_id=style_id,
         layer_id=layer_id,
+    )
+
+
+class LayerUpdateRequest(BaseModel):
+    name: str = Field(description="New name for the layer")
+
+
+class LayerUpdateResponse(BaseModel):
+    layer_id: str = Field(description="ID of the updated layer")
+    name: str = Field(description="New name of the layer")
+
+
+@layer_router.patch(
+    "/layer/{layer_id}",
+    operation_id="update_layer",
+    summary="Update layer",
+    response_model=LayerUpdateResponse,
+)
+async def update_layer(
+    update_data: LayerUpdateRequest,
+    layer: MapLayer = Depends(get_layer),
+    user_id: str = Depends(session_user_id),
+) -> LayerUpdateResponse:
+    """Updates properties of an existing layer. Currently supports updating
+    the layer's display name.
+
+    ```py
+    result = httpx.patch(
+        "https://app.mundi.ai/api/layer/L4b2c3d4e5f6",
+        json={"name": "New name in layer list"},
+        headers={"Authorization": f"Bearer {os.environ['MUNDI_API_KEY']}"}
+    ).json()
+
+    assert result == {
+        "layer_id": "L4b2c3d4e5f6",
+        "name": "New name in layer list",
+        "message": "Layer updated successfully"
+    }
+    ```"""
+    if user_id != str(layer.owner_uuid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the layer owner can update this layer",
+        )
+
+    async with get_async_db_connection() as conn:
+        await conn.execute(
+            """
+            UPDATE map_layers SET name = $1, last_edited = CURRENT_TIMESTAMP
+            WHERE layer_id = $2
+            """,
+            update_data.name,
+            layer.layer_id,
+        )
+
+    return LayerUpdateResponse(
+        layer_id=layer.layer_id,
+        name=update_data.name,
     )

@@ -13,23 +13,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import os
-import base64
-import json
-import time
-import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from fastapi_proxy_lib.fastapi.app import reverse_http_app, reverse_ws_app
-import httpx
 
 from src.routes import (
     postgres_routes,
     project_routes,
-    room_routes,
     message_routes,
     websocket,
     conversation_routes,
@@ -60,26 +52,10 @@ app = FastAPI(
 )
 
 
-@app.exception_handler(httpx.RemoteProtocolError)
-async def handle_driftdb_error(request: Request, exc: httpx.RemoteProtocolError):
-    if not request.url.path.startswith("/room/"):
-        raise exc
-
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "Room not found, likely expired"},
-    )
-
-
 app.include_router(
     postgres_routes.router,
     prefix="/api/maps",
     tags=["Maps"],
-)
-app.include_router(
-    room_routes.router,
-    prefix="/api/maps",
-    tags=["Collaboration"],
 )
 app.include_router(
     message_routes.router,
@@ -118,18 +94,6 @@ app.include_router(
 )
 
 
-# Create a combined proxy router for DriftDB that handles both HTTP and WebSocket
-# Use a WebSocket-capable proxy for the /room routes
-room_ws_app = reverse_ws_app(base_url="ws://driftdb:8080/room/")
-# Mount it as a sub-application
-app.mount("/room/", room_ws_app)
-
-# Use HTTP proxy for other DriftDB paths
-drift_app = reverse_http_app(base_url="http://driftdb:8080/")
-# Mount it as a sub-application
-app.mount("/drift/", drift_app)
-
-
 # TODO: this isn't useful right now. But we should work on it in the future
 # mcp = FastApiMCP(
 #     app,
@@ -149,44 +113,17 @@ app.mount("/drift/", drift_app)
 # mcp.mount()
 
 
-# First mount specific static assets to ensure they're properly served
 app.mount("/assets", StaticFiles(directory="frontendts/dist/assets"), name="spa-assets")
 
 
-@app.post("/supertokens/session/refresh")
-async def mock_session_refresh(request: Request):
-    # it's simpler for self hosters to not have to log in, and there's a big
-    # gap between a simple, self hostable app and a secure, multi tenant, public
-    # facing software
-    if os.environ.get("MUNDI_AUTH_MODE") == "edit":
-        # Create fake refresh response
-        expiry = int(time.time() * 1000) + 3600 * 1000  # 1 hour
-        front_token = base64.b64encode(
-            json.dumps({"uid": "demo", "ate": expiry, "up": {}}).encode()
-        ).decode()
+@app.get("/favicon-light.svg")
+async def get_favicon_light_svg():
+    return FileResponse("frontendts/dist/favicon-light.svg")
 
-        id_refresh = str(uuid.uuid4())
-        anti_csrf = str(uuid.uuid4())
-        access_tok = f"dummyAccess.{uuid.uuid4()}"
-        refresh_tok = f"dummyRefresh.{uuid.uuid4()}"
 
-        response = JSONResponse(status_code=200, content={})
-
-        # Headers
-        response.headers["front-token"] = front_token
-        response.headers["id-refresh-token"] = id_refresh
-        response.headers["anti-csrf"] = anti_csrf
-        response.headers["access-control-expose-headers"] = (
-            "front-token, id-refresh-token, anti-csrf"
-        )
-        response.headers["access-control-allow-credentials"] = "true"
-
-        # Cookies
-        response.set_cookie("sAccessToken", access_tok, httponly=True)
-        response.set_cookie("sRefreshToken", refresh_tok, httponly=True)
-        response.set_cookie("sIdRefreshToken", id_refresh, httponly=True)
-
-        return response
+@app.get("/favicon-dark.svg")
+async def get_favicon_dark_svg():
+    return FileResponse("frontendts/dist/favicon-dark.svg")
 
 
 @app.exception_handler(StarletteHTTPException)

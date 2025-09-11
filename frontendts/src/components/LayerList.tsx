@@ -1,6 +1,7 @@
 // Copyright Bunting Labs, Inc. 2025
 
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { ShareEmbedModal } from '@mundi/ee';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ChevronLeft,
@@ -18,7 +19,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { Map as MLMap } from 'maplibre-gl';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ReadyState } from 'react-use-websocket';
 import { toast } from 'sonner';
@@ -34,9 +35,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { ShareEmbedModal } from '@/lib/ee-loader';
 import type { ErrorEntry } from '../lib/frontend-types';
-import type { EphemeralAction, MapData, MapLayer, MapProject } from '../lib/types';
+import type { EphemeralAction, MapData, MapLayer, MapProject, PostgresConnectionDetails } from '../lib/types';
 
 interface UploadingFile {
   id: string;
@@ -46,10 +46,6 @@ interface UploadingFile {
   error?: string;
 }
 
-interface LayerWithStatus extends MapLayer {
-  status: 'added' | 'removed' | 'edited' | 'existing';
-}
-
 interface LayerListProps {
   project: MapProject;
   currentMapData: MapData;
@@ -57,7 +53,6 @@ interface LayerListProps {
   openDropzone: () => void;
   activeActions: EphemeralAction[];
   readyState: number;
-  driftDbConnected: boolean;
   isInConversation: boolean;
   setShowAttributeTable: (show: boolean) => void;
   setSelectedLayer: (layer: MapLayer | null) => void;
@@ -80,7 +75,6 @@ const LayerList: React.FC<LayerListProps> = ({
   openDropzone,
   readyState,
   activeActions,
-  driftDbConnected,
   isInConversation,
   setShowAttributeTable,
   setSelectedLayer,
@@ -127,6 +121,18 @@ const LayerList: React.FC<LayerListProps> = ({
   const [showESRIDialog, setShowESRIDialog] = useState(false);
   const [portError, setPortError] = useState<string | null>(null);
 
+  // Fetch PostGIS sources (database connections) for this project
+  const { data: projectSources } = useQuery({
+    queryKey: ['project', project.id, 'sources'],
+    queryFn: async () => {
+      const response = await fetch(`/api/projects/${project.id}/sources`);
+      if (!response.ok) throw new Error('Failed to fetch project sources');
+      return (await response.json()) as PostgresConnectionDetails[];
+    },
+    retry: 5,
+    retryDelay: (attempt) => 1000 * attempt,
+  });
+
   const postgisConnectionMutation = useMutation({
     mutationFn: async (connectionUri: string) => {
       const response = await fetch(`/api/projects/${currentMapData.project_id}/postgis-connections`, {
@@ -161,6 +167,7 @@ const LayerList: React.FC<LayerListProps> = ({
       // Invalidate the project query to refresh the data
       queryClient.invalidateQueries({ queryKey: ['project', currentMapData.project_id] });
       queryClient.invalidateQueries({ queryKey: ['project', currentMapData.project_id, 'map'] });
+      queryClient.invalidateQueries({ queryKey: ['project', currentMapData.project_id, 'sources'] });
     },
     onError: (error: Error) => {
       setPostgisError(error.message);
@@ -188,9 +195,37 @@ const LayerList: React.FC<LayerListProps> = ({
       // Invalidate the project query to refresh the data
       queryClient.invalidateQueries({ queryKey: ['project', project.id] });
       queryClient.invalidateQueries({ queryKey: ['project', project.id, 'map'] });
+      queryClient.invalidateQueries({ queryKey: ['project', project.id, 'sources'] });
     },
     onError: (error: Error) => {
       toast.error(`Failed to delete connection: ${error.message}`);
+    },
+  });
+
+  const renameMutation = useMutation({
+    mutationFn: async ({ layerId, newName }: { layerId: string; newName: string }) => {
+      const response = await fetch(`/api/layer/${layerId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: newName }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(errorData.detail || response.statusText);
+      }
+
+      return response.json();
+    },
+    onSuccess: () => {
+      updateMapData();
+      toast.success('Layer renamed');
+    },
+    onError: (error) => {
+      console.error('Error renaming layer:', error);
+      toast.error(`Error renaming layer: ${error.message}`);
     },
   });
 
@@ -227,31 +262,6 @@ const LayerList: React.FC<LayerListProps> = ({
     postgisConnectionMutation.mutate(connectionUri);
   };
 
-  const processedLayers = useMemo<LayerWithStatus[]>(() => {
-    const currentLayersArray = currentMapData.layers || [];
-
-    // Use diff from currentMapData to determine layer statuses
-    if (currentMapData.diff && currentMapData.diff.layer_diffs) {
-      const layerDiffMap = new globalThis.Map<string, string>(currentMapData.diff.layer_diffs.map((diff) => [diff.layer_id, diff.status]));
-
-      // Start with current layers and filter out removed ones
-      const layersWithStatus = currentLayersArray
-        .map((layer) => ({
-          ...layer,
-          status: (layerDiffMap.get(layer.id) || 'existing') as 'added' | 'removed' | 'edited' | 'existing',
-        }))
-        .filter((layer) => layer.status !== 'removed');
-
-      return layersWithStatus;
-    }
-
-    // If no diff, all layers are existing
-    return currentLayersArray.map((l) => ({
-      ...l,
-      status: 'existing' as const,
-    }));
-  }, [currentMapData]);
-
   return (
     <Card className="absolute top-4 left-4 max-h-[60vh] overflow-auto py-2 rounded-sm border-0 gap-2 max-w-72 w-full">
       <CardHeader className="px-2">
@@ -259,7 +269,7 @@ const LayerList: React.FC<LayerListProps> = ({
           <div className="flex items-center gap-2">
             <Tooltip>
               <TooltipTrigger>
-                {(!isInConversation || readyState === ReadyState.OPEN) && driftDbConnected ? (
+                {!isInConversation || readyState === ReadyState.OPEN ? (
                   <span className="text-green-300 inline-block">
                     <SignalHigh />
                   </span>
@@ -281,10 +291,6 @@ const LayerList: React.FC<LayerListProps> = ({
                       )}
                     </div>
                   )}
-                  <div className={driftDbConnected ? 'text-green-300' : 'text-red-300'}>
-                    cursors:{' '}
-                    {driftDbConnected ? <SignalHigh className="inline-block h-4 w-4" /> : <SignalLow className="inline-block h-4 w-4" />}
-                  </div>
                 </div>
               </TooltipContent>
             </Tooltip>
@@ -312,11 +318,9 @@ const LayerList: React.FC<LayerListProps> = ({
         </CardTitle>
       </CardHeader>
       <CardContent className="px-0">
-        {processedLayers.length > 0 ? (
+        {(currentMapData.layers?.length ?? 0) > 0 ? (
           <ul className="text-sm">
-            {processedLayers.map((layerWithStatus: LayerWithStatus) => {
-              const { status, ...layerDetails } = layerWithStatus;
-
+            {(currentMapData.layers ?? []).map((layerDetails: MapLayer) => {
               // Check if this layer has an active action
               const hasActiveAction = activeActions.some((action) => action.layer_id === layerDetails.id);
               const num_highlighted = 0;
@@ -354,22 +358,23 @@ const LayerList: React.FC<LayerListProps> = ({
                   <LayerListItem
                     name={layerDetails.name}
                     nameClassName={getNameClassName()}
-                    status={status}
                     isActive={hasActiveAction}
                     hoverText={hoverText}
                     normalText={normalText}
                     legendSymbol={<LayerLegendSymbol layerDetails={layerDetails} />}
-                    displayAsDiff={currentMapData.display_as_diff}
                     layerId={layerDetails.id}
                     isVisible={!hiddenLayerIDs.includes(layerDetails.id)}
                     title={errorTitle}
                     onToggleVisibility={(layerId) => {
                       toggleLayerVisibility(layerId);
                     }}
+                    onRename={(layerId, newName) => {
+                      renameMutation.mutate({ layerId, newName });
+                    }}
                     dropdownActions={{
                       'zoom-to-layer': {
                         label: 'Zoom to layer',
-                        disabled: status === 'removed',
+                        disabled: false,
                         action: (layerId) => {
                           const layer = currentMapData.layers?.find((l) => l.id === layerId);
                           if (!layer) {
@@ -392,7 +397,7 @@ const LayerList: React.FC<LayerListProps> = ({
                       },
                       'view-attributes': {
                         label: 'View attributes',
-                        disabled: status === 'removed',
+                        disabled: false,
                         action: (layerId) => {
                           const layer = currentMapData.layers?.find((l) => l.id === layerId);
                           if (!layer) {
@@ -405,18 +410,14 @@ const LayerList: React.FC<LayerListProps> = ({
                       },
                       'export-geopackage': {
                         label: 'Export as GeoPackage',
-                        disabled: status === 'removed' || layerWithStatus.type != 'vector',
+                        disabled: layerDetails.type !== 'vector',
                         action: () => {
                           // TODO: Implement geopackage export
                         },
                       },
                       'delete-layer': {
-                        label: status === 'removed' ? 'Layer marked as removed' : 'Delete layer',
+                        label: 'Delete layer',
                         action: (layerId) => {
-                          if (status === 'removed') {
-                            toast.info('Layer is already removed.');
-                            return;
-                          }
                           fetch(`/api/maps/${currentMapData.map_id}/layer/${layerId}`, {
                             method: 'DELETE',
                             headers: { 'Content-Type': 'application/json' },
@@ -498,8 +499,8 @@ const LayerList: React.FC<LayerListProps> = ({
           </>
         )}
 
-        {/* Sources section */}
-        {project?.postgres_connections && project.postgres_connections.length > 0 && (
+        {/* Database Sources section */}
+        {projectSources && projectSources.length > 0 && (
           <>
             <div className="flex items-center px-2 py-2">
               <div className="flex-1 h-px bg-gray-300 dark:bg-gray-600"></div>
@@ -507,7 +508,7 @@ const LayerList: React.FC<LayerListProps> = ({
               <div className="flex-1 h-px bg-gray-300 dark:bg-gray-600"></div>
             </div>
             <ul className="text-sm">
-              {project.postgres_connections.map((connection, index) =>
+              {projectSources.map((connection, index) =>
                 connection.last_error_text ? (
                   <TooltipProvider key={index}>
                     <Tooltip>

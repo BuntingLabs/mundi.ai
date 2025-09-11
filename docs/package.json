@@ -18,6 +18,7 @@
     "starlight-links-validator": "^0.17.0",
     "starlight-llms-txt": "^0.5.1",
     "starlight-openapi": "^0.19.1",
+    "starlight-sidebar-topics": "^0.6.0",
     "starlight-theme-rapide": "^0.5.1",
     "typescript": "^5.8.3"
   }

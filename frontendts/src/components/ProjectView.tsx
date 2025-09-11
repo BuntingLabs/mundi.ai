@@ -1,19 +1,18 @@
 // Copyright Bunting Labs, Inc. 2025
 
-import { DriftDBProvider } from 'driftdb-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Accept } from 'react-dropzone';
 import { useDropzone } from 'react-dropzone';
 import { useNavigate, useParams } from 'react-router-dom';
 import useWebSocket from 'react-use-websocket';
-import Session from 'supertokens-auth-react/recipe/session';
 import MapLibreMap from './MapLibreMap';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { fetchMaybeAuth, getJwt } from '@mundi/ee';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Map as MLMap } from 'maplibre-gl';
 import { toast } from 'sonner';
 import type { ErrorEntry, UploadingFile } from '../lib/frontend-types';
-import type { Conversation, EphemeralAction, MapProject, MapTreeResponse } from '../lib/types';
+import type { Conversation, EphemeralAction, MapProject, MapTreeResponse, PostgresConnectionDetails } from '../lib/types';
 import { usePersistedState } from '../lib/usePersistedState';
 
 const DROPZONE_ACCEPT: Accept = {
@@ -34,9 +33,9 @@ const DROPZONE_ACCEPT: Accept = {
 export default function ProjectView() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const sessionContext = Session.useSessionContext();
 
   const { projectId, versionIdParam } = useParams();
+
   if (!projectId) {
     throw new Error('No project ID');
   }
@@ -47,22 +46,47 @@ export default function ProjectView() {
   // handle a single store of project<->map<->conversation data
   const { data: project } = useQuery({
     queryKey: ['project', projectId],
-    queryFn: () => fetch(`/api/projects/${projectId}`).then((res) => res.json() as Promise<MapProject>),
+    queryFn: async () => {
+      const res = await fetchMaybeAuth(`/api/projects/${projectId}`);
+      if (res.status === 404) {
+        // Either not found or not shared; surface cleanly
+        throw new Error('Project not found');
+      }
+      return (await res.json()) as MapProject;
+    },
     refetchInterval: projectRefetchInterval,
   });
 
-  // Update refetch interval based on loading PostGIS connections
-  useEffect(() => {
-    const hasLoadingConnections = project?.postgres_connections?.some((connection) => !connection.is_documented);
+  // Fetch project PostGIS sources and update refetch interval while documenting
+  const { data: projectSources } = useQuery({
+    queryKey: ['project', projectId, 'sources'],
+    queryFn: async () => {
+      const res = await fetch(`/api/projects/${projectId}/sources`);
+      if (!res.ok) throw new Error('Failed to fetch project sources');
+      return (await res.json()) as PostgresConnectionDetails[];
+    },
+    retry: 5,
+    retryDelay: (attempt) => 1000 * attempt,
+  });
 
+  useEffect(() => {
+    const hasLoadingConnections = (projectSources || []).some((c) => !c.is_documented);
     setProjectRefetchInterval(hasLoadingConnections ? 4000 : false);
-  }, [project?.postgres_connections]);
+  }, [projectSources]);
 
   const [conversationId, setConversationId] = usePersistedState<number | null>('conversationId', [projectId], null);
-  const { data: conversations } = useQuery({
+  const { data: conversations, isError: conversationsError } = useQuery({
     queryKey: ['project', projectId, 'conversations'],
-    queryFn: () => fetch(`/api/conversations?project_id=${projectId}`).then((res) => res.json() as Promise<Conversation[]>),
+    queryFn: async () => {
+      const res = await fetch(`/api/conversations?project_id=${projectId}`);
+      if (!res.ok) throw new Error('Failed to fetch conversations');
+      return (await res.json()) as Conversation[];
+    },
+    retry: 5,
+    retryDelay: (attempt) => 1000 * attempt,
   });
+  const conversationsEnabled = !conversationsError;
+  const effectiveConversationId = conversationsEnabled ? conversationId : null;
 
   const versionId = versionIdParam || (project?.maps && project.maps.length > 0 ? project.maps[project.maps.length - 1] : null);
 
@@ -78,19 +102,28 @@ export default function ProjectView() {
 
   const { error, data: mapData } = useQuery({
     queryKey: ['project', projectId, 'map', versionId],
-    queryFn: () => fetch(`/api/maps/${versionId}?diff_map_id=auto`).then((res) => res.json()),
+    queryFn: async () => {
+      const res = await fetch(`/api/maps/${versionId}`);
+      if (res.status === 404) {
+        throw new Error('Map not found');
+      }
+      return await res.json();
+    },
     // prevent map (query parameter) refreshing this
     refetchOnMount: false,
     enabled: !!versionId,
   });
 
   const { data: mapTree } = useQuery({
-    queryKey: ['project', projectId, 'map', versionId, 'tree', conversationId],
-    queryFn: () =>
-      fetch(`/api/maps/${versionId}/tree${conversationId ? `?conversation_id=${conversationId}` : ''}`).then(
-        (res) => res.json() as Promise<MapTreeResponse>,
-      ),
+    queryKey: ['project', projectId, 'map', versionId, 'tree', effectiveConversationId],
+    queryFn: async () => {
+      const res = await fetch(`/api/maps/${versionId}/tree${effectiveConversationId ? `?conversation_id=${effectiveConversationId}` : ''}`);
+      if (!res.ok) throw new Error('Failed to fetch map tree');
+      return (await res.json()) as MapTreeResponse;
+    },
     enabled: !!versionId,
+    retry: 5,
+    retryDelay: (attempt) => 1000 * attempt,
     placeholderData: (previousData) => {
       if (!previousData) return undefined;
       // mapTree being null/undefined makes the version visualization flicker, so
@@ -104,12 +137,6 @@ export default function ProjectView() {
         })),
       };
     },
-  });
-
-  const { data: roomId } = useQuery({
-    queryKey: ['project', projectId, 'room'],
-    queryFn: () => fetch(`/api/maps/${projectId}/room`).then((res) => res.json() as Promise<{ room_id: string }>),
-    enabled: !!versionId,
   });
 
   // tracking ephemeral state, where reloading the page will reset
@@ -167,18 +194,6 @@ export default function ProjectView() {
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const [jwt, setJwt] = useState<string | undefined>(undefined);
 
-  // authenticating web sockets
-  useEffect(() => {
-    const getSessionData = async () => {
-      if (await Session.doesSessionExist()) {
-        const accessToken = await Session.getAccessToken();
-
-        setJwt(accessToken);
-      }
-    };
-    getSessionData();
-  }, []);
-
   const wsUrl = useMemo(() => {
     if (!conversationId) {
       return null;
@@ -188,6 +203,17 @@ export default function ProjectView() {
 
     return `${wsProtocol}//${window.location.host}/api/maps/ws/${conversationId}/messages/updates?token=${jwt}`;
   }, [conversationId, wsProtocol, jwt]);
+
+  // If EE is present, fetch a JWT for authenticated websockets
+  useEffect(() => {
+    let mounted = true;
+    getJwt().then((token: string | undefined) => {
+      if (mounted && token) setJwt(token);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Track page visibility and allow socket to remain open for 10 minutes after hidden
   const WS_REMAIN_OPEN_FOR_MS = 10 * 60 * 1000; // 10 minutes
@@ -222,7 +248,7 @@ export default function ProjectView() {
   }, []);
 
   // WebSocket using react-use-websocket - only connect when in a conversation
-  const shouldConnect = !sessionContext.loading && conversationId !== null && (isTabVisible || !hiddenTimeoutExpired);
+  const shouldConnect = conversationId !== null && (isTabVisible || !hiddenTimeoutExpired);
   const backoffMs = [30, 1_000, 5_000, 15_000, 50_000];
   const { lastMessage, readyState } = useWebSocket(
     wsUrl,
@@ -408,12 +434,12 @@ export default function ProjectView() {
     (acceptedFiles: File[]) => {
       if (!versionId || acceptedFiles.length === 0) return;
 
-      const maxFileSize = 100 * 1024 * 1024; // 100MB in bytes
+      const maxFileSize = 500 * 1024 * 1024; // 500MB in bytes
 
       // Filter out files that are too large
       const validFiles = acceptedFiles.filter((file) => {
         if (file.size > maxFileSize) {
-          toast.error(`File "${file.name}" is too large. Files over 100MB aren't supported yet.`);
+          toast.error(`File "${file.name}" is too large. Files over 500MB aren't supported yet.`);
           return false;
         }
         return true;
@@ -457,23 +483,7 @@ export default function ProjectView() {
     setHiddenLayerIDs((prev) => (prev.includes(layerId) ? prev.filter((id) => id !== layerId) : [...prev, layerId]));
   };
 
-  if (sessionContext.loading) {
-    return <div className="p-6">Loading session...</div>;
-  }
-
-  if (!sessionContext.doesSessionExist) {
-    return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold mb-4">Map View</h1>
-        <p>Please log in to view this map.</p>
-        <a href="/auth" className="text-blue-500 hover:underline">
-          Login
-        </a>
-      </div>
-    );
-  }
-
-  if (!project || !versionId || !roomId) {
+  if (!project || !versionId) {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold mb-4">
@@ -501,34 +511,33 @@ export default function ProjectView() {
       <input {...getInputProps()} />
 
       {/* Interactive Map Section */}
-      <DriftDBProvider api="/drift/" room={roomId.room_id}>
-        <MapLibreMap
-          mapId={versionId}
-          height="100%"
-          project={project}
-          mapData={mapData}
-          mapTree={mapTree || null}
-          conversationId={conversationId}
-          conversations={conversations || []}
-          setConversationId={setConversationId}
-          readyState={readyState}
-          openDropzone={open}
-          uploadingFiles={uploadingFiles}
-          hiddenLayerIDs={hiddenLayerIDs}
-          toggleLayerVisibility={toggleLayerVisibility}
-          mapRef={mapRef}
-          activeActions={activeActions}
-          setActiveActions={setActiveActions}
-          zoomHistory={zoomHistory}
-          zoomHistoryIndex={zoomHistoryIndex}
-          setZoomHistoryIndex={setZoomHistoryIndex}
-          addError={addError}
-          dismissError={dismissError}
-          errors={errors}
-          invalidateProjectData={invalidateProjectData}
-          invalidateMapData={invalidateMapData}
-        />
-      </DriftDBProvider>
+      <MapLibreMap
+        mapId={versionId}
+        height="100%"
+        project={project}
+        mapData={mapData}
+        mapTree={mapTree || null}
+        conversationId={effectiveConversationId}
+        conversations={conversations || []}
+        conversationsEnabled={conversationsEnabled}
+        setConversationId={setConversationId}
+        readyState={readyState}
+        openDropzone={open}
+        uploadingFiles={uploadingFiles}
+        hiddenLayerIDs={hiddenLayerIDs}
+        toggleLayerVisibility={toggleLayerVisibility}
+        mapRef={mapRef}
+        activeActions={activeActions}
+        setActiveActions={setActiveActions}
+        zoomHistory={zoomHistory}
+        zoomHistoryIndex={zoomHistoryIndex}
+        setZoomHistoryIndex={setZoomHistoryIndex}
+        addError={addError}
+        dismissError={dismissError}
+        errors={errors}
+        invalidateProjectData={invalidateProjectData}
+        invalidateMapData={invalidateMapData}
+      />
     </div>
   );
 }

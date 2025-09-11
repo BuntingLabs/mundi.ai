@@ -121,6 +121,7 @@ async def startup_listener():
 
 
 async def _chat_pg_listener(dsn: str):
+    conn = None
     try:
         conn = await asyncpg.connect(dsn)
 
@@ -137,7 +138,8 @@ async def _chat_pg_listener(dsn: str):
         traceback.print_exc()
     finally:
         try:
-            await conn.close()
+            if conn is not None:
+                await conn.close()
         except Exception:
             pass
 
@@ -168,7 +170,7 @@ async def cleanup_recently_disconnected_users():
 
 async def get_websocket_conversation(
     conversation_id: int, user_context: UserContext
-) -> Conversation:
+) -> Conversation | None:
     """Get conversation for WebSocket with proper authentication"""
     user_id = user_context.get_user_id()
 

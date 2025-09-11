@@ -15,6 +15,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
+import httpx
 
 
 class BaseMapProvider(ABC):
@@ -40,64 +41,91 @@ class BaseMapProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_style_display_names(self) -> Dict[str, str]:
+        """Return mapping of style names to human-readable display names."""
+        pass
+
 
 class OpenStreetMapProvider(BaseMapProvider):
     """Default base map provider using OpenStreetMap tiles."""
 
     async def get_base_style(self, name: Optional[str] = None) -> Dict[str, Any]:
-        """Return a basic MapLibre GL style using OpenStreetMap tiles.
+        """Return a MapLibre GL style for the specified basemap.
 
         Args:
-            name: Basemap name parameter (ignored in public version)
+            name: Basemap name - supports 'openstreetmap' and 'openfreemap' (default: 'openstreetmap')
         """
-        return {
-            "version": 8,
-            "name": "OpenStreetMap",
-            "metadata": {
-                "maplibre:logo": "https://maplibre.org/",
-            },
-            "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-            "sources": {
-                "osm": {
-                    "type": "raster",
-                    "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-                    "tileSize": 256,
-                    "attribution": "© OpenStreetMap contributors",
-                    "maxzoom": 19,
-                }
-            },
-            "layers": [
-                {
-                    "id": "osm",
-                    "type": "raster",
-                    "source": "osm",
-                    "layout": {"visibility": "visible"},
-                    "paint": {},
-                }
-            ],
-            "center": [0, 0],
-            "zoom": 2,
-            "bearing": 0,
-            "pitch": 0,
-        }
+        # Default to openstreetmap if no name provided
+        basemap_name = name or "openstreetmap"
+
+        if basemap_name == "openfreemap":
+            # Fetch the OpenFreeMap vector style from their API
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://tiles.openfreemap.org/styles/liberty"
+                )
+                response.raise_for_status()
+                return response.json()
+        else:
+            # Default OpenStreetMap style
+            return {
+                "version": 8,
+                "name": "OpenStreetMap",
+                "metadata": {
+                    "maplibre:logo": "https://maplibre.org/",
+                },
+                "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+                "sources": {
+                    "osm": {
+                        "type": "raster",
+                        "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+                        "tileSize": 256,
+                        "attribution": "© OpenStreetMap contributors",
+                        "maxzoom": 19,
+                    }
+                },
+                "layers": [
+                    {
+                        "id": "osm",
+                        "type": "raster",
+                        "source": "osm",
+                        "layout": {"visibility": "visible"},
+                        "paint": {},
+                    }
+                ],
+                "center": [0, 0],
+                "zoom": 2,
+                "bearing": 0,
+                "pitch": 0,
+            }
 
     def get_available_styles(self) -> List[str]:
         """Return list of available basemap style names."""
-        return ["openstreetmap"]
+        return ["openstreetmap", "openfreemap"]
 
     def get_csp_policies(self) -> Dict[str, List[str]]:
-        """Return CSP policies required for OpenStreetMap tiles."""
+        """Return CSP policies required for OpenStreetMap and OpenFreeMap tiles."""
         return {
             "connect-src": [
                 "https://tile.openstreetmap.org",
+                "https://tiles.openfreemap.org",
                 "https://demotiles.maplibre.org",
             ],
             "img-src": [
                 "https://tile.openstreetmap.org",
+                "https://tiles.openfreemap.org",
                 "https://demotiles.maplibre.org",
             ],
-            "font-src": ["https://demotiles.maplibre.org"],
+            "font-src": [
+                "https://demotiles.maplibre.org",
+                "https://tiles.openfreemap.org",
+            ],
         }
+
+    def get_style_display_names(self) -> Dict[str, str]:
+        """Return mapping of style names to human-readable display names."""
+        return {"openstreetmap": "OpenStreetMap", "openfreemap": "OpenFreeMap"}
 
 
 # Default dependency - can be overridden in closed source

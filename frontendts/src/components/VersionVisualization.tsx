@@ -170,6 +170,7 @@ interface VersionVisualizationProps {
   conversations: Conversation[];
   setConversationId: (conversationId: number | null) => void;
   activeActions: EphemeralAction[];
+  conversationsEnabled?: boolean;
 }
 
 export default function VersionVisualization({
@@ -179,6 +180,7 @@ export default function VersionVisualization({
   conversations,
   setConversationId,
   activeActions,
+  conversationsEnabled = true,
 }: VersionVisualizationProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [expandedToolCalls, setExpandedToolCalls] = useState<string[]>([]);
@@ -365,7 +367,7 @@ export default function VersionVisualization({
     );
   };
 
-  return (
+  return conversationsEnabled ? (
     <div className="z-30 max-h-screen h-full w-96 bg-white dark:bg-gray-800 shadow-md flex flex-col text-halfway-sm-xs">
       <div className="flex-1 overflow-auto p-2">
         <div className="mb-4 bg-gray-700 rounded-md">
@@ -524,5 +526,5 @@ export default function VersionVisualization({
         </div>
       </div>
     </div>
-  );
+  ) : null;
 }

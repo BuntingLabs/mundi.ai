@@ -16,7 +16,7 @@
 import os
 from abc import ABC, abstractmethod
 from functools import lru_cache
-from .postgres_connection import PostgresConnectionManager
+from src.dependencies.postgres_connection import PostgresConnectionManager
 from redis import Redis
 
 redis = Redis(

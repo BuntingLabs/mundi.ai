@@ -20,7 +20,6 @@ import pytest
 async def test_create_map(auth_client):
     payload = {
         "title": "Test Map API",
-        "description": "A test map for API testing",
     }
     response = await auth_client.post(
         "/api/maps/create",
@@ -34,9 +33,8 @@ async def test_create_map(auth_client):
     data = response.json()
     assert "id" in data
     assert data["title"] == "Test Map API"
-    assert data["description"] == "A test map for API testing"
     assert "created_on" in data
-    assert "last_edited" in data
+    assert "map_link" in data
 
 
 @pytest.mark.anyio

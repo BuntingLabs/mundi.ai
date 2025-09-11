@@ -14,6 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import pytest
+import time
 
 
 @pytest.fixture
@@ -140,3 +141,75 @@ async def test_upload_kmz(test_map_id, auth_client):
         assert feature["geometry"]["type"] == "Polygon"
         assert "coordinates" in feature["geometry"]
         assert len(feature["geometry"]["coordinates"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_upload_ukraine_fgb_timed(test_map_id, auth_client):
+    file_path = "test_fixtures/ukraine.fgb"
+
+    start_time = time.time()
+
+    with open(file_path, "rb") as f:
+        files = {"file": ("ukraine.fgb", f)}
+        data = {
+            "layer_name": "Ukraine FGB Layer",
+        }
+
+        response = await auth_client.post(
+            f"/api/maps/{test_map_id}/layers",
+            files=files,
+            data=data,
+        )
+
+    end_time = time.time()
+    upload_duration = end_time - start_time
+
+    assert upload_duration < 10.0, (
+        f"Upload took {upload_duration:.2f} seconds, expected under 10 seconds"
+    )
+    assert response.status_code == 200, f"Failed to upload FGB: {response.text}"
+
+    response_data = response.json()
+    layer_id = response_data["id"]
+
+    response = await auth_client.get(
+        f"/api/layer/{layer_id}.pmtiles",
+    )
+
+    assert response.status_code == 200, f"Failed to access pmtiles: {response.text}"
+
+
+@pytest.mark.anyio
+async def test_upload_singlepoint_fgb_timed(test_map_id, auth_client):
+    file_path = "test_fixtures/singlepoint.fgb"
+
+    start_time = time.time()
+
+    with open(file_path, "rb") as f:
+        files = {"file": ("singlepoint.fgb", f)}
+        data = {
+            "layer_name": "Single Point FGB Layer",
+        }
+
+        response = await auth_client.post(
+            f"/api/maps/{test_map_id}/layers",
+            files=files,
+            data=data,
+        )
+
+    end_time = time.time()
+    upload_duration = end_time - start_time
+
+    assert upload_duration < 10.0, (
+        f"Upload took {upload_duration:.2f} seconds, expected under 10 seconds"
+    )
+    assert response.status_code == 200, f"Failed to upload FGB: {response.text}"
+
+    response_data = response.json()
+    layer_id = response_data["id"]
+
+    response = await auth_client.get(
+        f"/api/layer/{layer_id}.pmtiles",
+    )
+
+    assert response.status_code == 200, f"Failed to access pmtiles: {response.text}"

@@ -23,7 +23,7 @@ import pytest
 @pytest.mark.anyio
 async def test_zip_shapefile_upload(auth_client):
     # Create a temporary map for testing
-    project = {"layers": []}
+    project = {}
 
     payload = {
         "project": project,
@@ -41,6 +41,7 @@ async def test_zip_shapefile_upload(auth_client):
     )
     map_id = response.json()["id"]
 
+    temp_zip_path: str | None = None
     try:
         temp_zip_path = tempfile.mktemp(suffix=".zip")
         shp_dir = os.path.join(
@@ -92,13 +93,13 @@ async def test_zip_shapefile_upload(auth_client):
             assert "COMMENT" in feature["properties"]
 
     finally:
-        if os.path.exists(temp_zip_path):
+        if temp_zip_path is not None and os.path.exists(temp_zip_path):
             os.unlink(temp_zip_path)
 
 
 @pytest.mark.anyio
 async def test_zip_shapefile_upload_macosx(auth_client):
-    project = {"layers": []}
+    project = {}
 
     payload = {
         "project": project,
@@ -163,7 +164,7 @@ async def test_zip_shapefile_upload_macosx(auth_client):
 @pytest.mark.anyio
 async def test_invalid_zip_file_upload(auth_client):
     # Create a temporary map for testing
-    project = {"layers": []}
+    project = {}
 
     payload = {
         "project": project,
@@ -181,6 +182,7 @@ async def test_invalid_zip_file_upload(auth_client):
     )
     map_id = response.json()["id"]
 
+    temp_zip_path: str | None = None
     try:
         temp_zip_path = tempfile.mktemp(suffix=".zip")
 
@@ -198,5 +200,5 @@ async def test_invalid_zip_file_upload(auth_client):
             assert response.status_code == 400
 
     finally:
-        if os.path.exists(temp_zip_path):
+        if temp_zip_path is not None and os.path.exists(temp_zip_path):
             os.unlink(temp_zip_path)

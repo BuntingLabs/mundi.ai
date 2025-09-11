@@ -19,12 +19,12 @@ from pathlib import Path
 
 @pytest.fixture
 async def test_map_with_layer(auth_client):
-    map_payload = {
-        "project": {"layers": [], "crs": {"epsg_code": 3857}},
-        "title": "Set Layer Style Test Map",
-        "description": "Test map for set layer style endpoint",
-    }
-    map_response = await auth_client.post("/api/maps/create", json=map_payload)
+    map_response = await auth_client.post(
+        "/api/maps/create",
+        json={
+            "title": "Set Layer Style Test Map",
+        },
+    )
     assert map_response.status_code == 200, f"Failed to create map: {map_response.text}"
     map_id = map_response.json()["id"]
 

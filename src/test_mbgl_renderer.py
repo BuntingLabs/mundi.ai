@@ -261,6 +261,8 @@ async def test_mbgl_idaho(test_map_with_idaho_layer, auth_client):
             json.dumps(maplibre_style),
             str(uuid.uuid4()),
         )
+        # Ensure fetchrow returned a record for type narrowing
+        assert style_result is not None
         new_style_id = style_result[0]
         await conn.execute(
             """

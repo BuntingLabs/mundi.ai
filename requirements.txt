@@ -43,7 +43,6 @@ execnet==2.1.1
 fastapi==0.115.12
 fastapi-cli==0.0.7
 fastapi-mcp==0.3.3
-fastapi-proxy-lib==0.3.0
 fastjsonschema==2.16.3
 filelock==3.18.0
 fiona==1.10.1

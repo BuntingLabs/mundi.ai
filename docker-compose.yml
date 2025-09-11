@@ -9,7 +9,6 @@ services:
       dockerfile: Dockerfile
       args:
         - VITE_WEBSITE_DOMAIN=http://localhost:8000
-        - VITE_EMAIL_VERIFICATION=disable
       x-bake:
         tags:
           - "${APP_IMAGE:-mundi-public:local}"
@@ -21,8 +20,6 @@ services:
       mc:
         condition: service_completed_successfully
       postgresdb:
-        condition: service_healthy
-      driftdb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -36,7 +33,6 @@ services:
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_BUCKET=test-bucket
       - WEBSITE_DOMAIN=http://localhost:8000
-      - DRIFTDB_SERVER_URL=http://driftdb:8080
       - QGIS_PROCESSING_URL=http://qgis-processing:8817
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -103,25 +99,6 @@ services:
       timeout: 5s
       retries: 10
 
-  driftdb:
-    platform: linux/amd64
-    image: ${DRIFTDB_IMAGE:-driftdb-local}
-    build:
-      context: ./driftdb
-      dockerfile: driftdb-server/Dockerfile
-      x-bake:
-        tags:
-          - driftdb-local
-    environment:
-      # - USE_HTTPS_WSS=1
-      - HOSTNAME_OVERRIDE=localhost:5173
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "cat /proc/net/tcp | grep '1F90'"]
-      interval: 1s
-      timeout: 2s
-      retries: 5
-      start_period: 3s
 
   redis:
     image: redis:alpine

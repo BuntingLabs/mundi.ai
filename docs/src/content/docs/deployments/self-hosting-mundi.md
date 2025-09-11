@@ -113,28 +113,3 @@ For sharing maps publicly, you can configure Mundi to run in
 data. This can be changed by setting the environment variable `MUNDI_AUTH_MODE=view_only`
 in the `docker-compose.yml` file. It defaults to `edit`.
 
-### SSL configuration
-
-If you use HTTPS with Mundi, then you'll also need to edit the `driftdb` configuration to instruct the application
-to route WebSocket connections over WSS.
-
-You need to modify the `docker-compose.yml` file:
-
-1. Locate the `driftdb` service in your `docker-compose.yml` file
-2. Uncomment the `USE_HTTPS_WSS=1` environment variable:
-
-```yaml
-driftdb:
-  platform: linux/amd64
-  image: ${DRIFTDB_IMAGE:-driftdb-local}
-  build:
-    context: ./driftdb
-    dockerfile: driftdb-server/Dockerfile
-  environment:
-    - USE_HTTPS_WSS=1  # Uncomment this line
-    - HOSTNAME_OVERRIDE=localhost:5173
-  restart: unless-stopped
-```
-
-You may also decide to update `HOSTNAME_OVERRIDE` to match your domain though this may not be needed. The port and hostname
-should reflect what the end JavaScript frontend application should connect to, not the internal port and hostname of your server.
