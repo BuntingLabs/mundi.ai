@@ -4,12 +4,20 @@ description: Mundi's AI Georeferencer can georectify aerial/satellite
   imagery automatically in under 15 seconds and return a GeoTIFF/GCPs.
 ---
 
+import { LinkButton } from '@astrojs/starlight/components';
+
 The [AI Georeferencer](https://app.mundi.ai/ee/georeferencer) in Mundi takes
 any PNG, JPEG, WEBP, PDF or TIFF, and turns it into a GeoTIFF automatically. It works by comparing your image
 directly to local reference imagery to detect ground control
 points, just as you would if you were manually georectifying it in ArcGIS or QGIS.
 Our AI takes 10 seconds per image, on average, and gives you the ground control points (GCPs)
 so you can manually adjust after.
+
+<div style={{ textAlign: 'center' }}>
+  <LinkButton href="https://app.mundi.ai/ee/georeferencer" icon="right-arrow">
+    **Try AI georeferencer**
+  </LinkButton>
+</div>
 
 Because our AI is robust, it works on satellite and aerial imagery, both
 historical and modern drone photography, and scanned maps with annotations
