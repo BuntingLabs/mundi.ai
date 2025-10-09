@@ -7,17 +7,16 @@ You can access run Segment Anything [online in Mundi](https://app.mundi.ai/tools
 imagery, satellite imagery, and traditional maps. These polygons are already processed
 in Mundi to be downloadable as vector spatial data as a GeoJSON.
 
-The Segment Anything tool available in Mundi uses [Meta's SAM 2](https://ai.meta.com/sam2/). To
-use the model, you add points to what you want to segment, and points to anything
-which resembles your target to teach the model what not to segment. You will be shown
-three different possible outcomes from the model and select the best one for download.
+The Segment Anything tool available in Mundi uses Meta's Segment Anything Model. To
+use the model, you just need to draw a bounding box around each object you want to 
+segment. Once you have segmented everything, you can download the output as a GeoJSON.
 
 You can access the Segment Anything tool online, and do not need to own a GPU or download
 any model. You can upload any imagery you need to segment or use our catalogue of imagery. 
-Using the Segment Anything tool on your custom imagery requires a [Mundi subscription](https://mundi.ai/pricing), starting at $45/month. 
+Using the Segment Anything tool requires a Mundi subscription, starting at $45/month. 
 There are sample locations with imagery loaded you can evaluate on in Mundi.
 
-![the Mundi Segment Anything tool with example imagery already segmented](../../../assets/segment-anything/segment-anything-page.jpg) 
+![the Mundi Segment Anything tool with example imagery already segmented](../../../assets/segment-anything/segment-anything-bboxes.jpg) 
 
 ## Introduction to Segment Anything
 
@@ -33,8 +32,10 @@ catalogue of aerial imagery. Selecting your own region or adding your own imager
 requires a [Mundi Basic subscription](https://mundi.ai/pricing). If you first want to evaluate the Segment 
 Anything model, you can try our free public examples. 
 
+![upload options](../../../assets/segment-anything/upload-options.jpg)
+
 :::note
-If your imagery is not yet georeferenced, try our [AI Georeferencer](https://docs.mundi.ai/guides/ai-georeferencer-for-aerial-imagery/). 
+If your maps are not yet georeferenced, try our [AI Georeferencer.](https://docs.mundi.ai/guides/ai-georeferencer-for-aerial-imagery/). 
 :::
 
 ### Free public examples
@@ -51,65 +52,31 @@ Unlike other Segment Anything applications, there are no downloads needed to run
 Mundi's Segment Anything tool. You only need to find the imagery you want to segment, 
 add your positive and negative points, and download your preferred result. 
 
-This will walk through the best practices for the four steps to get the best output: 
-1. Select what you want to segment 
-2. Refine the output with negative examples
-3. Pick the best segmentation from three versions
-4. Download the result 
+Unlike other applications of Segment Anything, this tool requires creating a bounding
+box around each target. We found that allowing the model to predict more targets leads 
+to much noisier results, requiring more clean up time. 
 
-### Select what you want to segment 
+### Select the bounding box tool
 
-To pick what you want to segment, you add points to your target to teach the model 
-what it is. The more points you can add the better, and if you have multiple targets
-in one image (for example, buildings in a neighborhood) it is best to add points to
-multiple targets. 
+To begin creating a bounding box, you need to seelct this icon. It will turn light grey
+when selected:
 
-The positive point button is selected by default, and you can find it in the top
-right portion of the view box with a green circle and the words **Positive (include)**.
+![the bounding box icon for the Segment Anything tool](../../../assets/segment-anything/bbox-button.jpg)
 
-![the control panel for the Segment Anything tool](../../../assets/segment-anything/segment-controls.jpg)
+### Draw a bounding box around each target
 
-:::note
-You can also undo your last selection with the Undo link, or start over with the Clear points link in the same menu. 
-:::
+Once the bounding box tool is active, you can begin to left click to create a bounding 
+box. Make sure to keep the box close to your target. Once you are done, either
+double left click or right click to save the box. Once you save a box, the model will
+run. 
 
-### Add negative examples to refine the model 
+![an unsegmented bounding box](../../../assets/segment-anything/bbox-drawn-2.jpg)
 
-Once you have positive examples, you should add negative examples of what you do not
-want to segment. This helps the model understand what is your target and what is not. 
-If something looks generally similar to your target, but you do not want it included,
-you should add a point or two to it, and do that in as many places as possible. 
+### Save the output
 
-The negative example button is to the right of the positive example button with a red
-circle and the words **Negative (avoid)**.
+Once you segment one target, you can either draw more boxes around more targets or 
+download the polygons as a GeoJSON.
 
-:::note
-The Undo and Clear points also apply to the negative example points.
-:::
+To download, select the **Download GeoJSON** button on the right side of the image. 
 
-### Select the best output
-
-Once you have added the negative and positive points, the segmentation model will 
-automatically run. You can alternatively hit the green **Segment image** button to
-run the model again. 
-
-![the option menu for different segment outputs](../../../assets/segment-anything/segment-options.jpg)
-
-The model will provide three different outputs so you can select the best one. The
-best output may not be at the top, so it's best to check all three. If you are not
-happy with the output, you can add more points and run the model again. 
-
-Here, you can see the difference between three different model outputs. Notice how
-the most accurate is the third option. 
-
-![the first output of the Segment Anything tool run on airplanes](../../../assets/segment-anything/segment-option-one.jpg)
-
-![the second output of the Segment Anything tool run on airplanes](../../../assets/segment-anything/segment-option-two.jpg)
-
-![the third output of the Segment Anything tool run on airplanes](../../../assets/segment-anything/segment-option-three.jpg)
-
-## Export the data
-
-Once you are happy with the output, select the **Download GeoJSON** button below
-the different output choices to download the polygons. You can add this new vector
-file to Mundi or your other GIS of choice. 
+![the option menu for different segment outputs](../../../assets/segment-anything/download-geojson.jpg)
