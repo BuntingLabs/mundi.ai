@@ -1,12 +1,18 @@
 ---
 title: AI Georeferencer for Aerial Imagery
-description: Mundi's AI Georeferencer can georectify aerial/satellite
+description: The AI Georeferencer can georectify aerial/satellite
   imagery automatically in under 15 seconds and return a GeoTIFF/GCPs.
 ---
 
 import { LinkButton } from '@astrojs/starlight/components';
 
-The [AI Georeferencer](https://buntinglabs.com/tools/ai-georeferencer) in Mundi takes
+:::note[Now hosted at Bunting Labs]
+The AI Georeferencer is now available at
+[buntinglabs.com](https://buntinglabs.com/tools/ai-georeferencer) and is accessed
+through your Bunting Labs account.
+:::
+
+The [AI Georeferencer](https://buntinglabs.com/tools/ai-georeferencer) takes
 any PNG, JPEG, WEBP, PDF or TIFF, and turns it into a GeoTIFF automatically. It works by comparing your image
 directly to local reference imagery to detect ground control
 points, just as you would if you were manually georectifying it in ArcGIS or QGIS.
@@ -27,9 +33,10 @@ like this one:
 
 ![scanned analog aerial photograph georeferencing](../../../assets/ai-georeferencer/aerial.jpg)
 
-:::note[Requires Mundi Professional]
+:::note[Requires Bunting Labs Personal or Professional]
 Running the AI Georeferencer is GPU-intensive, and as such, we require an
-[active Mundi professional subscription](https://mundi.ai/pricing) to use it.
+[active Bunting Labs Personal or Professional plan](https://buntinglabs.com/pricing)
+to use it.
 :::
 
 ## How to use the AI Georeferencer
@@ -104,7 +111,8 @@ see how well it aligns with the underlying base map.
 
 Once you are satisfied with a match, you can download the georeferenced
 output. Because the AI Georeferencer is a GPU-intensive process, downloading
-the final results requires a [**Mundi Professional** subscription](https://mundi.ai/pricing).
+the final results require an
+[**active Bunting Labs Personal or Professional plan**](https://buntinglabs.com/pricing).
 
 1.  Click the **Prepare Download** button on the row for your chosen match.
 2.  The system will generate a ZIP archive containing the GeoTIFF and a GCP
